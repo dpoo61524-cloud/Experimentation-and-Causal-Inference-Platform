@@ -1,0 +1,24 @@
+@"
+# venv
+.venv/
+venv/
+
+# cache
+__pycache__/
+*.py[cod]
+
+# env
+.env
+.env.*
+!.env.example
+
+# test aur cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# os file
+.vscode/
+.DS_Store
+Thumbs.db
+"@ | Set-Content .gitignore
