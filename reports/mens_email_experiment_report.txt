@@ -5,6 +5,11 @@ Experiment: Men's E-Mail vs No E-Mail
 
 GROUP RESULTS
 -------------
+Treatment visitors: 21307
+Treatment conversions: 267
+Control visitors: 21306
+Control conversions: 122
+
 Group A conversion rate: 1.25%
 Group B conversion rate: 0.57%
 

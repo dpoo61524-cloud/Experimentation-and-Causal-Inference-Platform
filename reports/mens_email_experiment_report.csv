@@ -1,0 +1,10 @@
+﻿Metric,Value
+experiment_name,Men's E-Mail vs No E-Mail
+group_a_conversion_rate,0.01253109306800582
+group_b_conversion_rate,0.005726086548390125
+absolute_difference_percentage_points,0.6805006519615695
+relative_lift_percent,118.84218762863279
+p_value,1.5232235005955427e-13
+confidence_interval_percentage_points,0.501434 to 0.864072
+statistically_significant,True
+conclusion,The difference is statistically significant at the 5% significance level.
