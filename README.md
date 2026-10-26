@@ -6,7 +6,9 @@ A Python platform for A/B testing, causal inference, and statistical analysis, f
 
 ## Features
 
-- **Statistical Comparison Engine**: Two-proportion z-test, Wilson confidence intervals, and p-value calculations.
+- **Conversion Rate Comparison Engine**: Two-proportion z-test, Wilson confidence intervals, and p-value calculations for binary metrics.
+- **Independent Two-Sample Welch's t-Test**: Hypothesis testing for continuous metrics (e.g., revenue per user, pages viewed, session duration) without assuming equal variances.
+- **Chi-Square Test of Independence**: Pearson's chi-square test on $r \times c$ contingency tables for categorical outcomes, complete with expected frequency evaluation and small-sample warnings.
 - **Sample Size Estimation**: Power analysis (`NormalIndPower`) to determine required sample size per group and total sample size given baseline rate, expected rate, alpha, and power.
 - **Multiple Comparisons Corrections**: Family-wise error rate control using Bonferroni and Benjamini-Hochberg (FDR) adjustments.
 - **Automated Experiment Reporting**: Human-readable terminal output and CSV exports of experiment findings.
@@ -108,7 +110,7 @@ curl -X GET http://127.0.0.1:8000/health
 
 ---
 
-### 3. Experiment Comparison Endpoint
+### 3. Experiment Comparison Endpoint (Proportions)
 - **URL**: `POST /api/experiment/compare`
 - **Description**: Compares two experiment groups using a two-proportion z-test. Calculates conversion rates, absolute difference, p-value, 95% confidence interval, and statistical significance.
 - **Validation**:
@@ -184,10 +186,95 @@ curl -X POST http://127.0.0.1:8000/api/experiment/sample-size \
 
 ---
 
+### 5. Independent Two-Sample t-Test Endpoint
+- **URL**: `POST /api/experiment/ttest`
+- **Description**: Performs Welch's two-sample t-test on continuous numerical metrics across two independent groups. Welch's t-test does not assume equal population variances ($s_a^2 \ne s_b^2$).
+- **Assumptions & Considerations**:
+  - **Independence**: Observations within each group and between the two groups must be independent.
+  - **Scale**: Data should be continuous numerical measurements (e.g. order value, revenue, session duration).
+  - **Normality**: Requires approximately normally distributed populations, or sufficiently large samples ($N \ge 30$) where the Central Limit Theorem holds.
+  - **Sample Size**: Each group must have at least 2 numerical observations.
+- **Alternative Hypotheses**: Supported options are `"two-sided"` (default), `"greater"` ($\mu_a > \mu_b$), or `"less"` ($\mu_a < \mu_b$).
+
+**Request (curl)**:
+```bash
+curl -X POST http://127.0.0.1:8000/api/experiment/ttest \
+  -H "Content-Type: application/json" \
+  -d '{
+    "group_a": [12.0, 15.0, 14.0, 10.0, 13.0, 14.0, 16.0],
+    "group_b": [9.0, 10.0, 11.0, 8.0, 12.0, 10.0, 9.0],
+    "alternative": "two-sided",
+    "alpha": 0.05
+  }'
+```
+
+**Response (200 OK)**:
+```json
+{
+  "t_statistic": 3.936479108111085,
+  "p_value": 0.0025220582997136265,
+  "sample_size_a": 7,
+  "sample_size_b": 7,
+  "mean_a": 13.428571428571429,
+  "mean_b": 9.857142857142858,
+  "difference_in_means": 3.571428571428571,
+  "degrees_of_freedom": 10.541941677667106,
+  "confidence_interval_95": [
+    1.5639151755674603,
+    5.578941967289682
+  ],
+  "statistically_significant": true,
+  "alternative": "two-sided"
+}
+```
+
+---
+
+### 6. Chi-Square Test of Independence Endpoint
+- **URL**: `POST /api/experiment/chi-square`
+- **Description**: Performs Pearson's chi-square test of independence on a 2D contingency table of categorical observation counts.
+- **Assumptions & Considerations**:
+  - **Independence**: Each subject/observation must contribute to exactly one cell in the contingency table.
+  - **Categorical Structure**: Mutually exclusive row and column classifications.
+  - **Sample Size & Cell Frequencies**: Reliable chi-square approximation assumes expected frequencies of at least 5 in most cells. If any expected frequency is below 5, an explicit warning is provided.
+  - **Table Dimensions**: Requires at least 2 rows and 2 columns ($r \ge 2, c \ge 2$) with non-negative counts and positive marginal totals.
+
+**Request (curl)**:
+```bash
+curl -X POST http://127.0.0.1:8000/api/experiment/chi-square \
+  -H "Content-Type: application/json" \
+  -d '{
+    "table": [
+      [50, 30],
+      [20, 40]
+    ],
+    "alpha": 0.05,
+    "correction": true
+  }'
+```
+
+**Response (200 OK)**:
+```json
+{
+  "chi_square_statistic": 10.529166666666667,
+  "degrees_of_freedom": 1,
+  "p_value": 0.0011750518530845063,
+  "expected_frequencies": [
+    [40.0, 40.0],
+    [30.0, 30.0]
+  ],
+  "statistically_significant": true,
+  "alpha": 0.05,
+  "warning": null
+}
+```
+
+---
+
 ## Interactive Documentation
 
 FastAPI generates interactive Swagger documentation automatically:
-1. Start the API server.
+1. Start the API server: `uvicorn src.api:app --reload`
 2. Open your browser and navigate to `http://127.0.0.1:8000/docs`.
 3. Test endpoints directly with the "Try it out" button.
 
@@ -195,7 +282,7 @@ FastAPI generates interactive Swagger documentation automatically:
 
 ## Running Automated Tests
 
-Run the full automated test suite (existing engine tests + API tests) using pytest:
+Run the full automated test suite (statistical engine unit tests + API integration tests) using pytest:
 
 ```bash
 pytest
