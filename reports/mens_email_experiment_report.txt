@@ -1,0 +1,24 @@
+EXPERIMENT REPORT
+=================
+
+Experiment: Men's E-Mail vs No E-Mail
+
+GROUP RESULTS
+-------------
+Group A conversion rate: 1.25%
+Group B conversion rate: 0.57%
+
+EFFECT
+------
+Absolute difference: 0.681 percentage points
+Relative lift: 118.84%
+
+STATISTICAL ANALYSIS
+--------------------
+P-value: 1.52322e-13
+95% confidence interval: [0.501, 0.864] percentage points
+Statistically significant: True
+
+CONCLUSION
+----------
+The difference is statistically significant at the 5% significance level.
