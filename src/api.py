@@ -23,6 +23,7 @@ from statistics_engine import (
     calculate_sample_size,
     two_sample_ttest,
     chi_square_test,
+    sequential_conversion_test,
 )
 
 app = FastAPI(
@@ -478,6 +479,178 @@ async def run_chi_square_endpoint(
             table=payload.table,
             alpha=payload.alpha,
             correction=payload.correction,
+        )
+        return results
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+
+class SequentialTestRequest(BaseModel):
+    checkpoint: int = Field(
+        ...,
+        description="Current checkpoint / interim look index (1 <= checkpoint <= total_checkpoints)",
+        examples=[1],
+    )
+    total_checkpoints: int = Field(
+        ...,
+        description="Total planned checkpoints / interim looks K (2, 3, 4, or 5)",
+        examples=[5],
+    )
+    conversions_a: int = Field(
+        ...,
+        description="Cumulative conversions in Control (Group A)",
+        examples=[20],
+    )
+    visitors_a: int = Field(
+        ...,
+        description="Cumulative visitors in Control (Group A)",
+        examples=[200],
+    )
+    conversions_b: int = Field(
+        ...,
+        description="Cumulative conversions in Treatment (Group B)",
+        examples=[45],
+    )
+    visitors_b: int = Field(
+        ...,
+        description="Cumulative visitors in Treatment (Group B)",
+        examples=[200],
+    )
+    max_visitors_per_group: int = Field(
+        ...,
+        description="Planned maximum visitors per group (N_max)",
+        examples=[1000],
+    )
+    alpha: float = Field(
+        0.05,
+        description="Overall two-sided significance level (e.g., 0.01, 0.05, 0.10)",
+        examples=[0.05],
+    )
+    evaluate_futility: bool = Field(
+        False,
+        description="Whether to evaluate non-binding directional futility heuristic",
+        examples=[False],
+    )
+    schedule_tolerance: float | None = Field(
+        0.15,
+        description="Allowable absolute deviation between observed and planned information fractions",
+        examples=[0.15],
+    )
+
+    @field_validator(
+        "checkpoint",
+        "total_checkpoints",
+        "conversions_a",
+        "visitors_a",
+        "conversions_b",
+        "visitors_b",
+        "max_visitors_per_group",
+        mode="before",
+    )
+    @classmethod
+    def check_strictly_integer(cls, value: Any, info: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError(f"{info.field_name} must be an integer, not a boolean.")
+        if isinstance(value, float):
+            if not value.is_integer():
+                raise ValueError(f"{info.field_name} must be a whole integer.")
+            value = int(value)
+        return value
+
+    @model_validator(mode="after")
+    def validate_sequential_params(self) -> "SequentialTestRequest":
+        if self.total_checkpoints not in (2, 3, 4, 5):
+            raise ValueError("total_checkpoints must be one of 2, 3, 4, or 5.")
+        if not (1 <= self.checkpoint <= self.total_checkpoints):
+            raise ValueError(
+                f"checkpoint must be between 1 and {self.total_checkpoints}, got {self.checkpoint}."
+            )
+        if self.max_visitors_per_group <= 0:
+            raise ValueError("max_visitors_per_group must be greater than zero.")
+        if not (0 < self.alpha < 1):
+            raise ValueError("alpha must be strictly between 0 and 1.")
+        if self.visitors_a <= 0 or self.visitors_b <= 0:
+            raise ValueError("visitors must be greater than zero.")
+        if self.conversions_a < 0 or self.conversions_b < 0:
+            raise ValueError("conversions cannot be negative.")
+        if self.conversions_a > self.visitors_a:
+            raise ValueError("Group A conversions cannot exceed visitors.")
+        if self.conversions_b > self.visitors_b:
+            raise ValueError("Group B conversions cannot exceed visitors.")
+        if self.visitors_a > self.max_visitors_per_group:
+            raise ValueError(
+                f"Group A visitors ({self.visitors_a}) exceed planned max sample size ({self.max_visitors_per_group})."
+            )
+        if self.visitors_b > self.max_visitors_per_group:
+            raise ValueError(
+                f"Group B visitors ({self.visitors_b}) exceed planned max sample size ({self.max_visitors_per_group})."
+            )
+        if self.schedule_tolerance is not None and not (0.0 <= self.schedule_tolerance <= 1.0):
+            raise ValueError("schedule_tolerance must be between 0 and 1, or None.")
+        return self
+
+
+class SequentialTestResponse(BaseModel):
+    design: str = Field(..., description="Group-sequential design used")
+    methodology: str = Field(..., description="Underlying mathematical computation methodology")
+    checkpoint: int = Field(..., description="Current look index evaluated")
+    total_checkpoints: int = Field(..., description="Total planned looks K")
+    planned_information_fraction: float = Field(..., description="Planned information fraction t_k = k/K")
+    observed_information_fraction: float = Field(..., description="Observed information fraction (nA + nB)/(2*N_max)")
+    schedule_tolerance: float | None = Field(None, description="Tolerance applied to information fraction schedule")
+    schedule_compliant: bool = Field(..., description="Whether observed sample size meets schedule assumptions")
+    max_visitors_per_group: int = Field(..., description="Planned maximum sample size per group")
+    conversions_a: int = Field(..., description="Cumulative conversions in Control")
+    visitors_a: int = Field(..., description="Cumulative visitors in Control")
+    conversion_rate_a: float = Field(..., description="Control conversion rate")
+    conversions_b: int = Field(..., description="Cumulative conversions in Treatment")
+    visitors_b: int = Field(..., description="Cumulative visitors in Treatment")
+    conversion_rate_b: float = Field(..., description="Treatment conversion rate")
+    absolute_difference: float = Field(..., description="Treatment conversion rate - Control conversion rate")
+    z_statistic: float = Field(..., description="Pooled two-proportion z-statistic")
+    nominal_p_value: float = Field(..., description="Two-sided unadjusted nominal p-value")
+    efficacy_boundary_z: float = Field(..., description="O'Brien-Fleming critical boundary at this look")
+    nominal_alpha_threshold: float = Field(..., description="Nominal alpha spent at this look")
+    all_planned_boundaries_z: List[float] = Field(..., description="Full vector of planned boundaries across all K looks")
+    efficacy_boundary_crossed: bool = Field(..., description="Whether |Z| >= Z_crit at this look")
+    maximum_sample_size_reached: bool = Field(..., description="Whether this is the final planned look (k = K)")
+    evaluate_futility: bool = Field(..., description="Whether futility heuristic was evaluated")
+    futility_boundary_crossed: bool = Field(..., description="Whether directional futility condition was met")
+    futility_recommendation: str | None = Field(None, description="Advisory non-binding futility recommendation")
+    decision: str = Field(..., description="Statistical decision: stop_for_efficacy, continue, stop_max_sample_size_efficacy_achieved, or stop_max_sample_size_inconclusive")
+    overall_alpha: float = Field(..., description="Overall targeted Type I error rate")
+    explanation: str = Field(..., description="Educational explanation of the result and next steps")
+    assumptions: str = Field(..., description="Key statistical assumptions governing this test")
+
+
+@app.post(
+    "/api/experiment/sequential",
+    response_model=SequentialTestResponse,
+    tags=["Experimentation"],
+    summary="Group-sequential testing for conversion rates",
+)
+async def run_sequential_endpoint(
+    payload: SequentialTestRequest,
+) -> Dict[str, Any]:
+    """Evaluate an ongoing A/B conversion experiment at an interim or final checkpoint.
+
+    Uses discrete O'Brien-Fleming canonical boundaries to control overall Type I error.
+    """
+    try:
+        results = sequential_conversion_test(
+            checkpoint=payload.checkpoint,
+            total_checkpoints=payload.total_checkpoints,
+            conversions_a=payload.conversions_a,
+            visitors_a=payload.visitors_a,
+            conversions_b=payload.conversions_b,
+            visitors_b=payload.visitors_b,
+            max_visitors_per_group=payload.max_visitors_per_group,
+            alpha=payload.alpha,
+            evaluate_futility=payload.evaluate_futility,
+            schedule_tolerance=payload.schedule_tolerance,
         )
         return results
     except ValueError as exc:

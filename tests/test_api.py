@@ -524,3 +524,185 @@ def test_chi_square_invalid_types_and_missing_fields():
     assert res4.status_code == 422
 
 
+# --- Sequential Testing Endpoint Tests ---
+
+def test_sequential_endpoint_early_efficacy_stopping():
+    """Verify sequential endpoint detects early efficacy boundary crossing at interim look."""
+    payload = {
+        "checkpoint": 1,
+        "total_checkpoints": 5,
+        "conversions_a": 10,
+        "visitors_a": 200,
+        "conversions_b": 80,
+        "visitors_b": 200,
+        "max_visitors_per_group": 1000,
+        "alpha": 0.05,
+    }
+    response = client.post("/api/experiment/sequential", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["checkpoint"] == 1
+    assert data["total_checkpoints"] == 5
+    assert data["planned_information_fraction"] == pytest.approx(0.20)
+    assert data["observed_information_fraction"] == pytest.approx(0.20)
+    assert data["schedule_compliant"] is True
+    assert data["efficacy_boundary_crossed"] is True
+    assert data["maximum_sample_size_reached"] is False
+    assert data["decision"] == "stop_for_efficacy"
+    assert data["efficacy_boundary_z"] == pytest.approx(4.562, abs=0.01)
+    assert "crossed the O'Brien-Fleming efficacy boundary" in data["explanation"]
+
+
+def test_sequential_endpoint_continuation():
+    """Verify sequential endpoint returns continue when boundary is not crossed."""
+    payload = {
+        "checkpoint": 2,
+        "total_checkpoints": 5,
+        "conversions_a": 40,
+        "visitors_a": 400,
+        "conversions_b": 46,
+        "visitors_b": 400,
+        "max_visitors_per_group": 1000,
+        "alpha": 0.05,
+    }
+    response = client.post("/api/experiment/sequential", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["checkpoint"] == 2
+    assert data["efficacy_boundary_crossed"] is False
+    assert data["maximum_sample_size_reached"] is False
+    assert data["decision"] == "continue"
+    assert "Continue experiment to next scheduled checkpoint" in data["explanation"]
+
+
+def test_sequential_endpoint_final_look_efficacy():
+    """Verify final look reaches maximum sample size and detects statistical significance."""
+    payload = {
+        "checkpoint": 5,
+        "total_checkpoints": 5,
+        "conversions_a": 100,
+        "visitors_a": 1000,
+        "conversions_b": 140,
+        "visitors_b": 1000,
+        "max_visitors_per_group": 1000,
+        "alpha": 0.05,
+    }
+    response = client.post("/api/experiment/sequential", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["checkpoint"] == 5
+    assert data["maximum_sample_size_reached"] is True
+    assert data["efficacy_boundary_crossed"] is True
+    assert data["decision"] == "stop_max_sample_size_efficacy_achieved"
+    assert "statistically significant at overall alpha=0.05" in data["explanation"]
+
+
+def test_sequential_endpoint_final_look_inconclusive():
+    """Verify final look non-crossing is reported as inconclusive evidence."""
+    payload = {
+        "checkpoint": 5,
+        "total_checkpoints": 5,
+        "conversions_a": 100,
+        "visitors_a": 1000,
+        "conversions_b": 105,
+        "visitors_b": 1000,
+        "max_visitors_per_group": 1000,
+        "alpha": 0.05,
+    }
+    response = client.post("/api/experiment/sequential", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["checkpoint"] == 5
+    assert data["maximum_sample_size_reached"] is True
+    assert data["efficacy_boundary_crossed"] is False
+    assert data["decision"] == "stop_max_sample_size_inconclusive"
+    assert "inconclusive evidence, NOT proof that the treatment has no effect" in data["explanation"]
+
+
+def test_sequential_endpoint_futility_recommendation():
+    """Verify non-binding futility recommendation in endpoint response."""
+    payload = {
+        "checkpoint": 3,
+        "total_checkpoints": 5,
+        "conversions_a": 60,
+        "visitors_a": 600,
+        "conversions_b": 50,
+        "visitors_b": 600,
+        "max_visitors_per_group": 1000,
+        "alpha": 0.05,
+        "evaluate_futility": True,
+    }
+    response = client.post("/api/experiment/sequential", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["futility_boundary_crossed"] is True
+    assert data["futility_recommendation"] == "stop_for_futility"
+    assert data["decision"] == "continue"
+    assert "does NOT prove absence of an effect" in data["explanation"]
+
+
+def test_sequential_endpoint_schedule_deviation_rejected():
+    """Verify schedule deviation beyond tolerance is rejected with 400 Bad Request."""
+    payload = {
+        "checkpoint": 1,
+        "total_checkpoints": 5,
+        "conversions_a": 90,
+        "visitors_a": 900,
+        "conversions_b": 90,
+        "visitors_b": 900,
+        "max_visitors_per_group": 1000,
+        "schedule_tolerance": 0.15,
+    }
+    response = client.post("/api/experiment/sequential", json=payload)
+    assert response.status_code == 400
+    assert "does not meet the design's schedule assumptions" in response.json()["detail"]
+
+
+def test_sequential_endpoint_validation_errors():
+    """Verify Pydantic request validation returns 422 for invalid parameters."""
+    base_valid = {
+        "checkpoint": 1,
+        "total_checkpoints": 5,
+        "conversions_a": 20,
+        "visitors_a": 200,
+        "conversions_b": 25,
+        "visitors_b": 200,
+        "max_visitors_per_group": 1000,
+        "alpha": 0.05,
+    }
+
+    # Conversions > visitors
+    res1 = client.post("/api/experiment/sequential", json={**base_valid, "conversions_a": 250})
+    assert res1.status_code == 422
+
+    # Visitors > max_visitors_per_group
+    res2 = client.post("/api/experiment/sequential", json={**base_valid, "visitors_a": 1500})
+    assert res2.status_code == 422
+
+    # Checkpoint > total_checkpoints
+    res3 = client.post("/api/experiment/sequential", json={**base_valid, "checkpoint": 6})
+    assert res3.status_code == 422
+
+    # Negative conversions
+    res4 = client.post("/api/experiment/sequential", json={**base_valid, "conversions_a": -5})
+    assert res4.status_code == 422
+
+    # Boolean count
+    res5 = client.post("/api/experiment/sequential", json={**base_valid, "conversions_a": True})
+    assert res5.status_code == 422
+
+    # Unsupported total_checkpoints (e.g., 6)
+    res6 = client.post("/api/experiment/sequential", json={**base_valid, "total_checkpoints": 6})
+    assert res6.status_code == 422
+
+    # Missing mandatory field
+    res7 = client.post("/api/experiment/sequential", json={"checkpoint": 1})
+    assert res7.status_code == 422
+
+
+
