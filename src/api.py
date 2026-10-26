@@ -22,6 +22,7 @@ from statistics_engine import (
     compare_conversion_rates,
     calculate_sample_size,
     two_sample_ttest,
+    chi_square_test,
 )
 
 app = FastAPI(
@@ -371,5 +372,121 @@ async def run_two_sample_ttest(
         )
 
 
+class ChiSquareRequest(BaseModel):
+    table: List[List[float]] = Field(
+        ...,
+        description=(
+            "2D contingency table of non-negative categorical observation counts "
+            "(at least 2 rows and 2 columns). For example: [[50, 30], [20, 40]]."
+        ),
+        examples=[[[50, 30], [20, 40]]],
+    )
+    alpha: float = Field(
+        default=0.05,
+        description="Significance level (alpha), strictly between 0 and 1. Default is 0.05.",
+        examples=[0.05],
+    )
+    correction: bool = Field(
+        default=True,
+        description="Whether to apply Yates' continuity correction for 2x2 tables. Default is True.",
+        examples=[True],
+    )
+
+    @field_validator("table", mode="before")
+    @classmethod
+    def validate_table_structure(cls, value: Any) -> Any:
+        if not isinstance(value, list) or len(value) < 2:
+            raise ValueError("table must be a 2D list with at least 2 rows.")
+        expected_cols = None
+        for row_idx, row in enumerate(value):
+            if not isinstance(row, list) or len(row) < 2:
+                raise ValueError(
+                    f"Row {row_idx} must be a list with at least 2 columns."
+                )
+            if expected_cols is None:
+                expected_cols = len(row)
+            elif len(row) != expected_cols:
+                raise ValueError(
+                    f"All rows must have the same number of columns. Row {row_idx} has {len(row)} columns, expected {expected_cols}."
+                )
+            for col_idx, cell in enumerate(row):
+                if isinstance(cell, bool) or cell is None:
+                    raise ValueError(
+                        f"Cell ({row_idx}, {col_idx}) contains invalid non-numeric or missing value."
+                    )
+                try:
+                    val = float(cell)
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"Cell ({row_idx}, {col_idx}) must be a number: {cell}"
+                    )
+                if math.isnan(val) or math.isinf(val):
+                    raise ValueError(
+                        f"Cell ({row_idx}, {col_idx}) cannot be NaN or infinite."
+                    )
+                if val < 0:
+                    raise ValueError(
+                        f"Cell ({row_idx}, {col_idx}) cannot be negative: {val}"
+                    )
+        return value
+
+    @model_validator(mode="after")
+    def validate_totals(self) -> "ChiSquareRequest":
+        if not (0 < self.alpha < 1):
+            raise ValueError("alpha must be strictly between 0 and 1.")
+        total = sum(sum(row) for row in self.table)
+        if total <= 0:
+            raise ValueError(
+                "Contingency table must contain at least one observation (total count > 0)."
+            )
+        for r_idx, row in enumerate(self.table):
+            if sum(row) == 0:
+                raise ValueError(f"Row {r_idx} has a sum of zero observations.")
+        col_count = len(self.table[0])
+        for c_idx in range(col_count):
+            col_sum = sum(self.table[r][c_idx] for r in range(len(self.table)))
+            if col_sum == 0:
+                raise ValueError(f"Column {c_idx} has a sum of zero observations.")
+        return self
+
+
+class ChiSquareResponse(BaseModel):
+    chi_square_statistic: float = Field(..., description="Pearson's chi-square test statistic")
+    degrees_of_freedom: int = Field(..., description="Degrees of freedom ((r-1) * (c-1))")
+    p_value: float = Field(..., description="Asymptotic p-value")
+    expected_frequencies: List[List[float]] = Field(..., description="Expected frequencies under null hypothesis")
+    statistically_significant: bool = Field(..., description="Whether p_value < alpha")
+    alpha: float = Field(..., description="Significance threshold used")
+    warning: str | None = Field(None, description="Warning if any expected cell frequency is less than 5")
+
+
+@app.post(
+    "/api/experiment/chi-square",
+    response_model=ChiSquareResponse,
+    tags=["Experimentation"],
+    summary="Chi-square test of independence",
+)
+async def run_chi_square_endpoint(
+    payload: ChiSquareRequest,
+) -> Dict[str, Any]:
+    """Perform Pearson's chi-square test of independence on a contingency table.
+
+    Assesses whether an association exists between two categorical variables.
+    """
+    try:
+        results = chi_square_test(
+            table=payload.table,
+            alpha=payload.alpha,
+            correction=payload.correction,
+        )
+        return results
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+
 if __name__ == "__main__":
     uvicorn.run("api:app", host="127.0.0.1", port=8000, reload=True)
+

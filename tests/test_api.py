@@ -405,3 +405,122 @@ def test_ttest_missing_fields_and_invalid_options():
     )
     assert res3.status_code == 422
 
+
+# --- Chi-Square Endpoint Tests ---
+
+def test_chi_square_valid_2x2():
+    """Verify chi-square endpoint with valid 2x2 table."""
+    payload = {
+        "table": [[50, 30], [20, 40]],
+        "alpha": 0.05,
+    }
+    response = client.post("/api/experiment/chi-square", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["degrees_of_freedom"] == 1
+    assert data["chi_square_statistic"] == pytest.approx(10.52917, rel=1e-4)
+    assert data["p_value"] == pytest.approx(0.001175, rel=1e-3)
+    assert data["statistically_significant"] is True
+    assert data["warning"] is None
+    assert data["expected_frequencies"][0] == pytest.approx([40.0, 40.0])
+    assert data["expected_frequencies"][1] == pytest.approx([30.0, 30.0])
+
+
+def test_chi_square_valid_larger_table():
+    """Verify chi-square endpoint with a 2x3 contingency table."""
+    payload = {
+        "table": [[20, 30, 25], [40, 15, 35]],
+    }
+    response = client.post("/api/experiment/chi-square", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["degrees_of_freedom"] == 2
+    assert len(data["expected_frequencies"]) == 2
+    assert len(data["expected_frequencies"][0]) == 3
+
+
+def test_chi_square_zero_count_cell_warning():
+    """Verify chi-square endpoint warning on small expected cell counts."""
+    payload = {
+        "table": [[0, 20], [10, 30]],
+    }
+    response = client.post("/api/experiment/chi-square", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["warning"] is not None
+    assert "less than 5" in data["warning"]
+
+
+def test_chi_square_invalid_dimensions():
+    """Verify rejection of 1D, single-row, or single-col tables."""
+    # 1D list
+    res1 = client.post("/api/experiment/chi-square", json={"table": [10, 20]})
+    assert res1.status_code == 422
+
+    # Single row
+    res2 = client.post("/api/experiment/chi-square", json={"table": [[10, 20]]})
+    assert res2.status_code == 422
+
+    # Single column
+    res3 = client.post("/api/experiment/chi-square", json={"table": [[10], [20]]})
+    assert res3.status_code == 422
+
+    # Jagged table
+    res4 = client.post(
+        "/api/experiment/chi-square",
+        json={"table": [[10, 20], [10, 20, 30]]},
+    )
+    assert res4.status_code == 422
+
+
+def test_chi_square_negative_counts_rejected():
+    """Verify negative counts return 422."""
+    payload = {"table": [[10, -5], [20, 30]]}
+    response = client.post("/api/experiment/chi-square", json=payload)
+    assert response.status_code == 422
+
+
+def test_chi_square_all_zero_and_empty_marginals_rejected():
+    """Verify all-zero tables and empty marginal rows/cols return 422."""
+    # All zeros
+    res1 = client.post("/api/experiment/chi-square", json={"table": [[0, 0], [0, 0]]})
+    assert res1.status_code == 422
+
+    # Row sum zero
+    res2 = client.post("/api/experiment/chi-square", json={"table": [[0, 0], [10, 20]]})
+    assert res2.status_code == 422
+
+    # Column sum zero
+    res3 = client.post("/api/experiment/chi-square", json={"table": [[0, 10], [0, 20]]})
+    assert res3.status_code == 422
+
+
+def test_chi_square_invalid_types_and_missing_fields():
+    """Verify invalid cell types and missing fields return 422."""
+    # String in cell
+    res1 = client.post(
+        "/api/experiment/chi-square",
+        json={"table": [[10, "many"], [20, 30]]},
+    )
+    assert res1.status_code == 422
+
+    # Boolean in cell
+    res2 = client.post(
+        "/api/experiment/chi-square",
+        json={"table": [[True, 10], [20, 30]]},
+    )
+    assert res2.status_code == 422
+
+    # None in cell
+    res3 = client.post(
+        "/api/experiment/chi-square",
+        json={"table": [[None, 10], [20, 30]]},
+    )
+    assert res3.status_code == 422
+
+    # Missing table field
+    res4 = client.post("/api/experiment/chi-square", json={})
+    assert res4.status_code == 422
+
+
