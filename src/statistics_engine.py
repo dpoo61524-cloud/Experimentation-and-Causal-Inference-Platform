@@ -269,3 +269,130 @@ def two_sample_ttest(
         "alternative": alternative,
     }
 
+
+def chi_square_test(
+    table: Sequence[Sequence[float | int]] | Any,
+    alpha: float = 0.05,
+    correction: bool = True,
+) -> dict:
+    """Perform Pearson's chi-square test of independence on a contingency table.
+
+    Assumptions & Requirements:
+    1. Independent observations: each unit of observation falls into exactly one cell.
+    2. Categorical variables with mutually exclusive categories.
+    3. Adequate expected cell counts: reliable chi-square approximations require
+       expected frequencies of at least 5 in most cells (and at least 1 in all cells).
+       When expected cell counts are too small, a warning is returned.
+
+    Parameters:
+    - table: 2D table of categorical counts (at least 2 rows and 2 columns).
+    - alpha: Significance threshold (default 0.05).
+    - correction: Whether to apply Yates' continuity correction for 2x2 tables (default True).
+
+    Returns:
+    Dictionary containing chi_square_statistic, degrees_of_freedom, p_value,
+    expected_frequencies, statistically_significant, alpha, and warning (if any).
+    """
+    if not 0 < alpha < 1:
+        raise ValueError("Alpha must be between 0 and 1.")
+
+    if not hasattr(table, "__iter__"):
+        raise ValueError("Contingency table must be a 2D sequence of numerical counts.")
+
+    rows = list(table)
+    if len(rows) < 2:
+        raise ValueError(
+            "Contingency table must contain at least 2 rows."
+        )
+
+    clean_table: list[list[float]] = []
+    expected_cols: int | None = None
+
+    for row_idx, row in enumerate(rows):
+        if not hasattr(row, "__iter__") or isinstance(row, (str, bytes, dict)):
+            raise ValueError(
+                f"Row {row_idx} of contingency table is not a valid sequence."
+            )
+        row_items = list(row)
+        if len(row_items) < 2:
+            raise ValueError(
+                f"Row {row_idx} must contain at least 2 columns."
+            )
+        if expected_cols is None:
+            expected_cols = len(row_items)
+        elif len(row_items) != expected_cols:
+            raise ValueError(
+                f"Inconsistent column count at row {row_idx}: expected {expected_cols}, got {len(row_items)}."
+            )
+
+        clean_row: list[float] = []
+        for col_idx, cell in enumerate(row_items):
+            if isinstance(cell, bool) or cell is None:
+                raise ValueError(
+                    f"Cell at ({row_idx}, {col_idx}) contains invalid non-numeric or missing value."
+                )
+            try:
+                val = float(cell)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"Cell at ({row_idx}, {col_idx}) contains non-numeric value: {cell}"
+                )
+            if math.isnan(val) or math.isinf(val):
+                raise ValueError(
+                    f"Cell at ({row_idx}, {col_idx}) contains NaN or infinite value."
+                )
+            if val < 0:
+                raise ValueError(
+                    f"Contingency table counts cannot be negative: cell ({row_idx}, {col_idx}) = {val}."
+                )
+            clean_row.append(val)
+        clean_table.append(clean_row)
+
+    matrix = np.array(clean_table, dtype=float)
+    total_count = float(np.sum(matrix))
+    if total_count <= 0:
+        raise ValueError(
+            "Contingency table must contain at least one observation (total count > 0)."
+        )
+
+    row_sums = np.sum(matrix, axis=1)
+    col_sums = np.sum(matrix, axis=0)
+
+    if np.any(row_sums == 0):
+        raise ValueError(
+            "Each row in the contingency table must contain at least one observation."
+        )
+    if np.any(col_sums == 0):
+        raise ValueError(
+            "Each column in the contingency table must contain at least one observation."
+        )
+
+    # Perform chi-square test
+    res = stats.chi2_contingency(matrix, correction=correction)
+    chi2_stat = float(res.statistic)
+    p_val = float(res.pvalue)
+    dof = int(res.dof)
+    expected_freq = res.expected_freq.tolist()
+
+    # Assess expected cell count adequacy
+    min_expected = float(np.min(res.expected_freq))
+    small_cells_count = int(np.sum(res.expected_freq < 5))
+
+    warning = None
+    if min_expected < 5.0:
+        warning = (
+            f"Warning: {small_cells_count} cell(s) have expected frequencies less than 5 "
+            f"(minimum expected frequency is {min_expected:.2f}). Chi-square approximation "
+            "may be unreliable. Consider combining categories or using Fisher's exact test for 2x2 tables."
+        )
+
+    return {
+        "chi_square_statistic": chi2_stat,
+        "degrees_of_freedom": dof,
+        "p_value": p_val,
+        "expected_frequencies": expected_freq,
+        "statistically_significant": bool(p_val < alpha),
+        "alpha": alpha,
+        "warning": warning,
+    }
+

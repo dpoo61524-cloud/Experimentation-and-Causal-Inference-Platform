@@ -13,6 +13,7 @@ from statistics_engine import (
     calculate_sample_size,
     calculate_conversion_confidence_interval,
     two_sample_ttest,
+    chi_square_test,
 )
 
 
@@ -199,3 +200,123 @@ def test_two_sample_ttest_invalid_inputs():
 
     with pytest.raises(ValueError, match="Alpha must be between 0 and 1"):
         two_sample_ttest([1, 2, 3], [4, 5, 6], alpha=1.5)
+
+
+# --- Chi-Square Test Unit Tests ---
+
+def test_chi_square_known_example():
+    """Verify chi-square test on a known reference 2x2 table."""
+    table = [
+        [50, 30],
+        [20, 40],
+    ]
+    result = chi_square_test(table)
+
+    assert result["chi_square_statistic"] == pytest.approx(10.52917, rel=1e-4)
+    assert result["p_value"] == pytest.approx(0.001175, rel=1e-3)
+    assert result["degrees_of_freedom"] == 1
+    assert result["statistically_significant"] is True
+    assert result["warning"] is None
+    assert result["expected_frequencies"][0] == pytest.approx([40.0, 40.0])
+    assert result["expected_frequencies"][1] == pytest.approx([30.0, 30.0])
+
+
+def test_chi_square_larger_table():
+    """Verify chi-square test on a 2x3 contingency table."""
+    table = [
+        [20, 30, 25],
+        [40, 15, 35],
+    ]
+    result = chi_square_test(table)
+
+    assert result["degrees_of_freedom"] == 2
+    assert len(result["expected_frequencies"]) == 2
+    assert len(result["expected_frequencies"][0]) == 3
+    assert result["chi_square_statistic"] > 0
+    assert 0 <= result["p_value"] <= 1
+
+
+def test_chi_square_zero_counts_valid():
+    """Verify chi-square test with zero count cell where marginal sums remain positive."""
+    table = [
+        [0, 20],
+        [10, 30],
+    ]
+    result = chi_square_test(table)
+
+    assert result["degrees_of_freedom"] == 1
+    assert result["chi_square_statistic"] == pytest.approx(4.335, rel=1e-3)
+    assert result["p_value"] == pytest.approx(0.03734, rel=1e-3)
+    assert result["warning"] is not None
+    assert "less than 5" in result["warning"]
+
+
+def test_chi_square_small_expected_counts_warning():
+    """Verify warning is returned when expected frequencies are below 5."""
+    table = [
+        [2, 3],
+        [4, 5],
+    ]
+    result = chi_square_test(table)
+
+    assert result["warning"] is not None
+    assert "Warning" in result["warning"]
+    assert "less than 5" in result["warning"]
+
+
+def test_chi_square_invalid_dimensions():
+    """Verify rejection of 1D, single-row, single-col, or jagged tables."""
+    # 1D list
+    with pytest.raises(ValueError, match="not a valid sequence"):
+        chi_square_test([10, 20])
+
+    # Single row
+    with pytest.raises(ValueError, match="at least 2 rows"):
+        chi_square_test([[10, 20]])
+
+    # Single column
+    with pytest.raises(ValueError, match="at least 2 columns"):
+        chi_square_test([[10], [20]])
+
+    # Inconsistent column counts
+    with pytest.raises(ValueError, match="Inconsistent column count"):
+        chi_square_test([[10, 20], [10, 20, 30]])
+
+
+def test_chi_square_negative_counts():
+    """Verify rejection of negative numbers."""
+    with pytest.raises(ValueError, match="cannot be negative"):
+        chi_square_test([[10, -5], [20, 30]])
+
+
+def test_chi_square_all_zero_and_zero_marginal_sums():
+    """Verify rejection of all-zero tables and empty marginal rows/cols."""
+    # All zeros
+    with pytest.raises(ValueError, match="at least one observation"):
+        chi_square_test([[0, 0], [0, 0]])
+
+    # Zero row sum
+    with pytest.raises(ValueError, match="Each row in the contingency table"):
+        chi_square_test([[0, 0], [10, 20]])
+
+    # Zero column sum
+    with pytest.raises(ValueError, match="Each column in the contingency table"):
+        chi_square_test([[0, 10], [0, 20]])
+
+
+def test_chi_square_invalid_inputs():
+    """Verify rejection of non-numeric, None, boolean, NaN, and invalid alpha."""
+    with pytest.raises(ValueError, match="non-numeric"):
+        chi_square_test([[10, "bad"], [20, 30]])
+
+    with pytest.raises(ValueError, match="invalid non-numeric or missing"):
+        chi_square_test([[10, None], [20, 30]])
+
+    with pytest.raises(ValueError, match="invalid non-numeric or missing"):
+        chi_square_test([[True, 10], [20, 30]])
+
+    with pytest.raises(ValueError, match="NaN or infinite"):
+        chi_square_test([[float("nan"), 10], [20, 30]])
+
+    with pytest.raises(ValueError, match="Alpha must be between 0 and 1"):
+        chi_square_test([[10, 20], [30, 40]], alpha=1.5)
