@@ -5,7 +5,7 @@ from statsmodels.stats.multitest import multipletests
 def correct_multiple_p_values(p_values, alpha=0.05):
     """Apply Bonferroni and Benjamini-Hochberg corrections."""
 
-    if not p_values:
+    if len(p_values) == 0:
         raise ValueError("p_values must not be empty.")
 
     if not 0 < alpha < 1:
