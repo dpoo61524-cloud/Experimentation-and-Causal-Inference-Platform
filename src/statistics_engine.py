@@ -1,23 +1,35 @@
 
-from statsmodels.stats.proportion import proportions_ztest, confint_proportions_2indep
+import math
+
+from statsmodels.stats.proportion import (
+    proportions_ztest,
+    confint_proportions_2indep,
+    proportion_confint,
+    proportion_effectsize,
+)
 from statsmodels.stats.power import NormalIndPower
-from statsmodels.stats.proportion import proportion_effectsize
+
+
 def compare_conversion_rates(
     conversions_a: int,
     visitors_a: int,
     conversions_b: int,
     visitors_b: int,
 ) -> dict:
-    """Compare two groups' conversion rates using a two-proportion z-test."""
+    """Compare two groups using a two-proportion z-test."""
 
     if visitors_a <= 0 or visitors_b <= 0:
         raise ValueError("Each group must have at least one visitor.")
 
     if not 0 <= conversions_a <= visitors_a:
-        raise ValueError("Group A conversions must be between 0 and its visitors.")
+        raise ValueError(
+            "Group A conversions must be between zero and its visitors."
+        )
 
     if not 0 <= conversions_b <= visitors_b:
-        raise ValueError("Group B conversions must be between 0 and its visitors.")
+        raise ValueError(
+            "Group B conversions must be between zero and its visitors."
+        )
 
     counts = [conversions_a, conversions_b]
     sample_sizes = [visitors_a, visitors_b]
@@ -45,11 +57,12 @@ def compare_conversion_rates(
         "absolute_difference": rate_a - rate_b,
         "z_statistic": float(z_statistic),
         "p_value": float(p_value),
-        "confidence_interval_95": [float(ci_low), float(ci_high)],
+        "confidence_interval_95": [
+            float(ci_low),
+            float(ci_high),
+        ],
         "statistically_significant": bool(p_value < 0.05),
     }
-
-import math
 
 
 def calculate_sample_size(
@@ -58,7 +71,7 @@ def calculate_sample_size(
     alpha: float = 0.05,
     power: float = 0.80,
 ) -> dict:
-    """Estimate the required sample size per group for a two-proportion A/B test."""
+    """Estimate sample size required per group for an A/B test."""
 
     if not 0 < baseline_rate < 1:
         raise ValueError("Baseline rate must be between 0 and 1.")
@@ -67,7 +80,9 @@ def calculate_sample_size(
         raise ValueError("Expected rate must be between 0 and 1.")
 
     if baseline_rate == expected_rate:
-        raise ValueError("Expected rate must differ from baseline rate.")
+        raise ValueError(
+            "Expected rate must differ from baseline rate."
+        )
 
     if not 0 < alpha < 1:
         raise ValueError("Alpha must be between 0 and 1.")
@@ -99,4 +114,44 @@ def calculate_sample_size(
         "power": power,
         "sample_size_per_group": sample_size,
         "total_sample_size": sample_size * 2,
+    }
+
+
+def calculate_conversion_confidence_interval(
+    conversions: int,
+    visitors: int,
+    confidence_level: float = 0.95,
+) -> dict:
+    """Calculate a Wilson confidence interval for one conversion rate."""
+
+    if visitors <= 0:
+        raise ValueError("Visitors must be greater than zero.")
+
+    if not 0 <= conversions <= visitors:
+        raise ValueError(
+            "Conversions must be between zero and visitors."
+        )
+
+    if not 0 < confidence_level < 1:
+        raise ValueError(
+            "Confidence level must be between 0 and 1."
+        )
+
+    rate = conversions / visitors
+    alpha = 1 - confidence_level
+
+    ci_low, ci_high = proportion_confint(
+        count=conversions,
+        nobs=visitors,
+        alpha=alpha,
+        method="wilson",
+    )
+
+    return {
+        "conversion_rate": rate,
+        "confidence_level": confidence_level,
+        "confidence_interval": [
+            float(ci_low),
+            float(ci_high),
+        ],
     }
