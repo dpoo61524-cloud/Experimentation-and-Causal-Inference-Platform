@@ -271,3 +271,137 @@ def test_invalid_field_types():
         json={"baseline_rate": True, "expected_rate": 0.12},
     )
     assert resp4.status_code == 422
+
+
+# --- Two-Sample t-Test Endpoint Tests ---
+
+def test_ttest_valid_request():
+    """Verify successful Welch's t-test calculation via API."""
+    payload = {
+        "group_a": [12, 15, 14, 10, 13, 14, 16],
+        "group_b": [9, 10, 11, 8, 12, 10, 9],
+        "alternative": "two-sided",
+        "alpha": 0.05,
+    }
+    response = client.post("/api/experiment/ttest", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["sample_size_a"] == 7
+    assert data["sample_size_b"] == 7
+    assert data["mean_a"] == pytest.approx(13.42857, rel=1e-4)
+    assert data["mean_b"] == pytest.approx(9.85714, rel=1e-4)
+    assert data["difference_in_means"] == pytest.approx(3.57143, rel=1e-4)
+    assert data["t_statistic"] == pytest.approx(3.93648, rel=1e-4)
+    assert data["p_value"] == pytest.approx(0.00252, rel=1e-3)
+    assert data["statistically_significant"] is True
+    assert data["degrees_of_freedom"] == pytest.approx(10.5419, rel=1e-3)
+    assert data["confidence_interval_95"][0] < data["confidence_interval_95"][1]
+    assert data["alternative"] == "two-sided"
+
+
+def test_ttest_alternative_greater():
+    """Verify t-test endpoint with 'greater' alternative hypothesis."""
+    payload = {
+        "group_a": [15.0, 16.0, 14.5, 15.5],
+        "group_b": [10.0, 11.0, 9.5, 10.5],
+        "alternative": "greater",
+    }
+    response = client.post("/api/experiment/ttest", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["p_value"] < 0.05
+    assert data["statistically_significant"] is True
+    assert data["alternative"] == "greater"
+
+
+def test_ttest_unequal_sample_sizes():
+    """Verify t-test endpoint handles unequal group sizes."""
+    payload = {
+        "group_a": [10.5, 11.2, 9.8, 10.1, 12.0, 11.5, 10.9, 11.1],
+        "group_b": [8.2, 8.5, 9.1, 8.8],
+    }
+    response = client.post("/api/experiment/ttest", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["sample_size_a"] == 8
+    assert data["sample_size_b"] == 4
+
+
+def test_ttest_constant_values_where_supported():
+    """Verify t-test endpoint when one group is constant and one has variance."""
+    payload = {
+        "group_a": [10.0, 10.0, 10.0, 10.0],
+        "group_b": [5.0, 8.0, 12.0, 15.0],
+    }
+    response = client.post("/api/experiment/ttest", json=payload)
+    assert response.status_code == 200
+
+
+def test_ttest_both_constant_rejected():
+    """Verify that both groups with zero variance are rejected with HTTP 400."""
+    payload = {
+        "group_a": [5.0, 5.0, 5.0],
+        "group_b": [5.0, 5.0, 5.0],
+    }
+    response = client.post("/api/experiment/ttest", json=payload)
+    assert response.status_code in (400, 422)
+    assert "detail" in response.json()
+    assert "traceback" not in response.text.lower()
+
+
+def test_ttest_insufficient_samples_rejected():
+    """Verify that samples with fewer than 2 elements return 422."""
+    payload1 = {"group_a": [10.0], "group_b": [10.0, 12.0]}
+    response1 = client.post("/api/experiment/ttest", json=payload1)
+    assert response1.status_code == 422
+
+    payload2 = {"group_a": [], "group_b": [10.0, 12.0]}
+    response2 = client.post("/api/experiment/ttest", json=payload2)
+    assert response2.status_code == 422
+
+
+def test_ttest_invalid_element_types_rejected():
+    """Verify that non-numeric or missing elements return 422."""
+    # String element
+    res1 = client.post(
+        "/api/experiment/ttest",
+        json={"group_a": [1.0, "bad", 3.0], "group_b": [4.0, 5.0]},
+    )
+    assert res1.status_code == 422
+
+    # None element
+    res2 = client.post(
+        "/api/experiment/ttest",
+        json={"group_a": [1.0, None, 3.0], "group_b": [4.0, 5.0]},
+    )
+    assert res2.status_code == 422
+
+    # Boolean element
+    res3 = client.post(
+        "/api/experiment/ttest",
+        json={"group_a": [True, 2.0, 3.0], "group_b": [4.0, 5.0]},
+    )
+    assert res3.status_code == 422
+
+
+def test_ttest_missing_fields_and_invalid_options():
+    """Verify missing fields and invalid alternatives return 422."""
+    # Missing group_b
+    res1 = client.post("/api/experiment/ttest", json={"group_a": [1.0, 2.0]})
+    assert res1.status_code == 422
+
+    # Invalid alternative
+    res2 = client.post(
+        "/api/experiment/ttest",
+        json={"group_a": [1.0, 2.0], "group_b": [3.0, 4.0], "alternative": "not_valid"},
+    )
+    assert res2.status_code == 422
+
+    # Invalid alpha
+    res3 = client.post(
+        "/api/experiment/ttest",
+        json={"group_a": [1.0, 2.0], "group_b": [3.0, 4.0], "alpha": 2.0},
+    )
+    assert res3.status_code == 422
+

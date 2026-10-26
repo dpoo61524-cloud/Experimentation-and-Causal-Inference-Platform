@@ -3,9 +3,10 @@
 Exposes statistical engine functionality for A/B testing and sample size estimation.
 """
 
+import math
 from pathlib import Path
 import sys
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -20,6 +21,7 @@ if str(SRC_DIR) not in sys.path:
 from statistics_engine import (
     compare_conversion_rates,
     calculate_sample_size,
+    two_sample_ttest,
 )
 
 app = FastAPI(
@@ -267,6 +269,99 @@ async def estimate_sample_size(
             expected_rate=payload.expected_rate,
             alpha=payload.alpha,
             power=payload.power,
+        )
+        return results
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+
+class TTestRequest(BaseModel):
+    group_a: List[float] = Field(
+        ...,
+        description="Numerical sample observations for Group A (at least 2 observations)",
+        examples=[[12, 15, 14, 10, 13, 14, 16]],
+    )
+    group_b: List[float] = Field(
+        ...,
+        description="Numerical sample observations for Group B (at least 2 observations)",
+        examples=[[9, 10, 11, 8, 12, 10, 9]],
+    )
+    alternative: Literal["two-sided", "greater", "less"] = Field(
+        default="two-sided",
+        description="Alternative hypothesis: 'two-sided', 'greater', or 'less'. Default is 'two-sided'.",
+        examples=["two-sided"],
+    )
+    alpha: float = Field(
+        default=0.05,
+        description="Significance level (alpha), between 0 and 1 (exclusive). Default is 0.05.",
+        examples=[0.05],
+    )
+
+    @field_validator("group_a", "group_b", mode="before")
+    @classmethod
+    def check_strictly_numbers(cls, values: Any, info: Any) -> Any:
+        if not isinstance(values, list):
+            raise ValueError(f"{info.field_name} must be a list of numbers.")
+        for v in values:
+            if isinstance(v, bool) or v is None:
+                raise ValueError(
+                    f"{info.field_name} contains invalid non-numeric or missing values."
+                )
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                raise ValueError(f"{info.field_name} contains non-numeric value: {v}")
+            if math.isnan(fv) or math.isinf(fv):
+                raise ValueError(f"{info.field_name} contains NaN or infinite values.")
+        return values
+
+    @model_validator(mode="after")
+    def validate_ttest_inputs(self) -> "TTestRequest":
+        if len(self.group_a) < 2:
+            raise ValueError("group_a must contain at least 2 numerical observations.")
+        if len(self.group_b) < 2:
+            raise ValueError("group_b must contain at least 2 numerical observations.")
+        if not (0 < self.alpha < 1):
+            raise ValueError("alpha must be strictly between 0 and 1.")
+        return self
+
+
+class TTestResponse(BaseModel):
+    t_statistic: float = Field(..., description="Welch's t-statistic")
+    p_value: float = Field(..., description="Two-sided or one-sided p-value")
+    sample_size_a: int = Field(..., description="Number of observations in Group A")
+    sample_size_b: int = Field(..., description="Number of observations in Group B")
+    mean_a: float = Field(..., description="Sample mean of Group A")
+    mean_b: float = Field(..., description="Sample mean of Group B")
+    difference_in_means: float = Field(..., description="Difference in sample means (mean_a - mean_b)")
+    degrees_of_freedom: float = Field(..., description="Welch-Satterthwaite degrees of freedom")
+    confidence_interval_95: List[float] = Field(..., description="95% confidence interval for difference in means")
+    statistically_significant: bool = Field(..., description="Whether p_value < alpha")
+    alternative: str = Field(..., description="Direction of alternative hypothesis tested")
+
+
+@app.post(
+    "/api/experiment/ttest",
+    response_model=TTestResponse,
+    tags=["Experimentation"],
+    summary="Independent two-sample Welch's t-test",
+)
+async def run_two_sample_ttest(
+    payload: TTestRequest,
+) -> Dict[str, Any]:
+    """Perform Welch's independent two-sample t-test on two continuous numerical samples.
+
+    Welch's t-test compares the means of two independent groups without assuming equal variances.
+    """
+    try:
+        results = two_sample_ttest(
+            sample_a=payload.group_a,
+            sample_b=payload.group_b,
+            alternative=payload.alternative,
+            alpha=payload.alpha,
         )
         return results
     except ValueError as exc:
