@@ -1,6 +1,9 @@
 
 import math
+from typing import Any, Sequence
 
+import numpy as np
+import scipy.stats as stats
 from statsmodels.stats.proportion import (
     proportions_ztest,
     confint_proportions_2indep,
@@ -155,3 +158,114 @@ def calculate_conversion_confidence_interval(
             float(ci_high),
         ],
     }
+
+
+def two_sample_ttest(
+    sample_a: Sequence[float | int] | Any,
+    sample_b: Sequence[float | int] | Any,
+    alternative: str = "two-sided",
+    alpha: float = 0.05,
+) -> dict:
+    """Perform Welch's independent two-sample t-test.
+
+    Welch's t-test compares the means of two independent groups without assuming
+    equal population variances (unlike Student's standard t-test).
+
+    Assumptions & Considerations:
+    1. Independent observations between and within groups.
+    2. Continuous numerical measurement scale.
+    3. Approximate normality in both populations, or sufficiently large sample
+       sizes (n >= 30) for the Central Limit Theorem to apply.
+
+    Parameters:
+    - sample_a: Numerical observations for Group A.
+    - sample_b: Numerical observations for Group B.
+    - alternative: 'two-sided', 'greater', or 'less'. Default is 'two-sided'.
+    - alpha: Significance threshold (default 0.05).
+
+    Returns:
+    Dictionary containing t_statistic, p_value, sample_size_a, sample_size_b,
+    mean_a, mean_b, difference_in_means, degrees_of_freedom, confidence_interval_95,
+    and statistically_significant.
+    """
+    valid_alternatives = ("two-sided", "greater", "less")
+    if alternative not in valid_alternatives:
+        raise ValueError(
+            f"Alternative hypothesis must be one of {valid_alternatives}. Got '{alternative}'."
+        )
+
+    if not 0 < alpha < 1:
+        raise ValueError("Alpha must be between 0 and 1.")
+
+    if not hasattr(sample_a, "__iter__") or not hasattr(sample_b, "__iter__"):
+        raise ValueError("Samples must be iterable sequences of numbers.")
+
+    clean_a: list[float] = []
+    for x in sample_a:
+        if isinstance(x, bool) or x is None:
+            raise ValueError("Sample A contains invalid non-numeric or missing values.")
+        try:
+            val = float(x)
+        except (TypeError, ValueError):
+            raise ValueError(f"Sample A contains non-numeric value: {x}")
+        if math.isnan(val) or math.isinf(val):
+            raise ValueError("Sample A contains NaN or infinite values.")
+        clean_a.append(val)
+
+    clean_b: list[float] = []
+    for x in sample_b:
+        if isinstance(x, bool) or x is None:
+            raise ValueError("Sample B contains invalid non-numeric or missing values.")
+        try:
+            val = float(x)
+        except (TypeError, ValueError):
+            raise ValueError(f"Sample B contains non-numeric value: {x}")
+        if math.isnan(val) or math.isinf(val):
+            raise ValueError("Sample B contains NaN or infinite values.")
+        clean_b.append(val)
+
+    if len(clean_a) < 2:
+        raise ValueError(
+            "Group A must contain at least 2 observations for a two-sample t-test."
+        )
+    if len(clean_b) < 2:
+        raise ValueError(
+            "Group B must contain at least 2 observations for a two-sample t-test."
+        )
+
+    var_a = float(np.var(clean_a, ddof=1))
+    var_b = float(np.var(clean_b, ddof=1))
+    if var_a == 0.0 and var_b == 0.0:
+        raise ValueError(
+            "Both samples have zero variance (all values are identical). The t-test is undefined."
+        )
+
+    # Perform Welch's t-test (equal_var=False)
+    res = stats.ttest_ind(clean_a, clean_b, equal_var=False, alternative=alternative)
+    t_stat = float(res.statistic)
+    p_val = float(res.pvalue)
+    df = float(res.df) if res.df is not None else None
+
+    mean_a = float(np.mean(clean_a))
+    mean_b = float(np.mean(clean_b))
+    diff_means = float(mean_a - mean_b)
+
+    # 95% confidence interval for difference in means (using two-sided critical value)
+    ci_res = stats.ttest_ind(clean_a, clean_b, equal_var=False, alternative="two-sided")
+    ci = ci_res.confidence_interval(confidence_level=1.0 - alpha)
+    ci_95 = [float(ci.low), float(ci.high)]
+
+    return {
+        "t_statistic": t_stat,
+        "p_value": p_val,
+        "sample_size_a": len(clean_a),
+        "sample_size_b": len(clean_b),
+        "mean_a": mean_a,
+        "mean_b": mean_b,
+        "difference_in_means": diff_means,
+        "degrees_of_freedom": df,
+        "confidence_interval_95": ci_95,
+        "statistically_significant": bool(p_val < alpha),
+        "alternative": alternative,
+    }
+

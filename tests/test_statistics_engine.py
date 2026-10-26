@@ -12,6 +12,7 @@ from statistics_engine import (
     compare_conversion_rates,
     calculate_sample_size,
     calculate_conversion_confidence_interval,
+    two_sample_ttest,
 )
 
 
@@ -97,3 +98,104 @@ def test_invalid_confidence_level_is_rejected():
             visitors=100,
             confidence_level=1.0,
         )
+
+
+# --- Two-Sample t-Test Unit Tests ---
+
+def test_two_sample_ttest_known_example():
+    """Verify Welch's t-test on a known reference dataset."""
+    sample_a = [12, 15, 14, 10, 13, 14, 16]
+    sample_b = [9, 10, 11, 8, 12, 10, 9]
+
+    result = two_sample_ttest(sample_a, sample_b)
+
+    assert result["sample_size_a"] == 7
+    assert result["sample_size_b"] == 7
+    assert result["mean_a"] == pytest.approx(13.42857, rel=1e-4)
+    assert result["mean_b"] == pytest.approx(9.85714, rel=1e-4)
+    assert result["difference_in_means"] == pytest.approx(3.57143, rel=1e-4)
+    assert result["t_statistic"] == pytest.approx(3.93648, rel=1e-4)
+    assert result["p_value"] == pytest.approx(0.00252, rel=1e-3)
+    assert result["degrees_of_freedom"] == pytest.approx(10.5419, rel=1e-3)
+    assert result["statistically_significant"] is True
+    assert result["confidence_interval_95"][0] < result["confidence_interval_95"][1]
+    assert result["confidence_interval_95"][0] == pytest.approx(1.5639, rel=1e-3)
+    assert result["confidence_interval_95"][1] == pytest.approx(5.5789, rel=1e-3)
+
+
+def test_two_sample_ttest_unequal_sample_sizes():
+    """Verify t-test functions correctly with unequal sample sizes."""
+    sample_a = [10.5, 11.2, 9.8, 10.1, 12.0, 11.5, 10.9, 11.1]
+    sample_b = [8.2, 8.5, 9.1, 8.8]
+
+    result = two_sample_ttest(sample_a, sample_b)
+
+    assert result["sample_size_a"] == 8
+    assert result["sample_size_b"] == 4
+    assert result["mean_a"] > result["mean_b"]
+    assert result["t_statistic"] > 0
+    assert result["p_value"] < 0.05
+    assert result["statistically_significant"] is True
+
+
+def test_two_sample_ttest_alternatives():
+    """Verify one-sided and two-sided alternative hypotheses."""
+    sample_a = [15.0, 16.0, 14.5, 15.5]
+    sample_b = [10.0, 11.0, 9.5, 10.5]
+
+    two_sided = two_sample_ttest(sample_a, sample_b, alternative="two-sided")
+    greater = two_sample_ttest(sample_a, sample_b, alternative="greater")
+    less = two_sample_ttest(sample_a, sample_b, alternative="less")
+
+    assert two_sided["p_value"] == pytest.approx(greater["p_value"] * 2)
+    assert less["p_value"] > 0.99
+    assert greater["alternative"] == "greater"
+    assert less["alternative"] == "less"
+
+
+def test_two_sample_ttest_constant_values_where_supported():
+    """Verify t-test when one sample has constant values and the other has variance."""
+    sample_a = [10.0, 10.0, 10.0, 10.0]
+    sample_b = [5.0, 8.0, 12.0, 15.0]
+
+    result = two_sample_ttest(sample_a, sample_b)
+    assert result["sample_size_a"] == 4
+    assert result["sample_size_b"] == 4
+    assert isinstance(result["t_statistic"], float)
+    assert isinstance(result["p_value"], float)
+
+
+def test_two_sample_ttest_both_constant_rejected():
+    """Verify that if both samples have zero variance, a ValueError is raised."""
+    with pytest.raises(ValueError, match="zero variance"):
+        two_sample_ttest([5, 5, 5], [5, 5, 5])
+
+
+def test_two_sample_ttest_insufficient_sample_sizes():
+    """Verify that samples with fewer than 2 observations are rejected."""
+    with pytest.raises(ValueError, match="at least 2 observations"):
+        two_sample_ttest([10], [10, 12, 14])
+
+    with pytest.raises(ValueError, match="at least 2 observations"):
+        two_sample_ttest([], [10, 12])
+
+
+def test_two_sample_ttest_invalid_inputs():
+    """Verify rejection of non-numeric, missing, boolean, NaN, and invalid options."""
+    with pytest.raises(ValueError, match="non-numeric"):
+        two_sample_ttest([1, "bad", 3], [4, 5, 6])
+
+    with pytest.raises(ValueError, match="invalid non-numeric or missing"):
+        two_sample_ttest([1, None, 3], [4, 5, 6])
+
+    with pytest.raises(ValueError, match="invalid non-numeric or missing"):
+        two_sample_ttest([True, 2, 3], [4, 5, 6])
+
+    with pytest.raises(ValueError, match="NaN or infinite"):
+        two_sample_ttest([float("nan"), 2, 3], [4, 5, 6])
+
+    with pytest.raises(ValueError, match="Alternative hypothesis must be one of"):
+        two_sample_ttest([1, 2, 3], [4, 5, 6], alternative="invalid")
+
+    with pytest.raises(ValueError, match="Alpha must be between 0 and 1"):
+        two_sample_ttest([1, 2, 3], [4, 5, 6], alpha=1.5)
