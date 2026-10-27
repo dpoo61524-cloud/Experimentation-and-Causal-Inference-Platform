@@ -705,4 +705,198 @@ def test_sequential_endpoint_validation_errors():
     assert res7.status_code == 422
 
 
+# --- Bayesian A/B Testing Endpoint ---
+
+def test_bayesian_endpoint_valid_request():
+    """Verify that a valid request to /api/experiment/bayesian returns HTTP 200 and expected fields."""
+    payload = {
+        "conversions_a": 45,
+        "visitors_a": 500,
+        "conversions_b": 60,
+        "visitors_b": 500,
+        "prior_alpha": 1.0,
+        "prior_beta": 1.0,
+        "credible_interval": 0.95,
+        "minimum_effect": 0.0,
+    }
+    response = client.post("/api/experiment/bayesian", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    # Verify presence of all primary fields
+    expected_keys = [
+        "visitors_a",
+        "conversions_a",
+        "conversion_rate_a",
+        "observed_conversion_rate_a",
+        "visitors_b",
+        "conversions_b",
+        "conversion_rate_b",
+        "observed_conversion_rate_b",
+        "observed_difference",
+        "observed_absolute_difference",
+        "prior_alpha",
+        "prior_beta",
+        "posterior_alpha_a",
+        "posterior_beta_a",
+        "posterior_alpha_b",
+        "posterior_beta_b",
+        "posterior_mean_a",
+        "posterior_mean_b",
+        "posterior_mean_difference",
+        "credible_interval_a",
+        "credible_interval_b",
+        "credible_interval_difference",
+        "probability_b_greater_than_a",
+        "probability_b_exceeds_a_by_minimum_effect",
+        "credible_interval_level",
+        "credible_interval",
+        "minimum_effect",
+        "simulation_method",
+        "num_samples",
+    ]
+    for key in expected_keys:
+        assert key in data, f"Missing key in response: {key}"
+
+    # Verify analytical posterior parameters and means
+    assert data["posterior_alpha_a"] == 46.0
+    assert data["posterior_beta_a"] == 456.0
+    assert data["posterior_alpha_b"] == 61.0
+    assert data["posterior_beta_b"] == 441.0
+    assert data["posterior_mean_a"] == pytest.approx(46.0 / 502.0)
+    assert data["posterior_mean_b"] == pytest.approx(61.0 / 502.0)
+    assert data["posterior_mean_difference"] == pytest.approx((61.0 - 46.0) / 502.0)
+
+    # Verify probability and intervals
+    assert 0.0 <= data["probability_b_greater_than_a"] <= 1.0
+    assert data["probability_b_greater_than_a"] > 0.85
+    assert data["credible_interval_a"][0] < data["credible_interval_a"][1]
+    assert data["credible_interval_b"][0] < data["credible_interval_b"][1]
+    assert data["credible_interval_difference"][0] < data["credible_interval_difference"][1]
+
+
+def test_bayesian_endpoint_nested_format_aliases():
+    """Verify that nested group_a and group_b objects are supported via aliases."""
+    payload = {
+        "group_a": {"conversions": 45, "visitors": 500},
+        "group_b": {"conversions": 60, "visitors": 500},
+    }
+    response = client.post("/api/experiment/bayesian", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["posterior_alpha_a"] == 46.0
+    assert data["posterior_alpha_b"] == 61.0
+
+
+def test_bayesian_endpoint_custom_priors():
+    """Verify that custom informative priors (e.g. Beta(5, 95)) pass through correctly."""
+    payload = {
+        "conversions_a": 10,
+        "visitors_a": 200,
+        "conversions_b": 25,
+        "visitors_b": 200,
+        "prior_alpha": 5.0,
+        "prior_beta": 95.0,
+    }
+    response = client.post("/api/experiment/bayesian", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["prior_alpha"] == 5.0
+    assert data["prior_beta"] == 95.0
+    assert data["posterior_alpha_a"] == 15.0
+    assert data["posterior_beta_a"] == 285.0
+    assert data["posterior_mean_a"] == pytest.approx(15.0 / 300.0)
+
+
+def test_bayesian_endpoint_custom_credible_interval():
+    """Verify that configuring a custom credible interval level (e.g. 0.90) is supported."""
+    payload = {
+        "conversions_a": 30,
+        "visitors_a": 300,
+        "conversions_b": 45,
+        "visitors_b": 300,
+        "credible_interval": 0.90,
+    }
+    response = client.post("/api/experiment/bayesian", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["credible_interval_level"] == 0.90
+    assert 0.0 <= data["credible_interval_a"][0] < data["credible_interval_a"][1] <= 1.0
+
+
+def test_bayesian_endpoint_positive_minimum_effect():
+    """Verify that specifying a positive minimum_effect returns a valid probability."""
+    payload = {
+        "conversions_a": 50,
+        "visitors_a": 1000,
+        "conversions_b": 80,
+        "visitors_b": 1000,
+        "minimum_effect": 0.01,
+    }
+    response = client.post("/api/experiment/bayesian", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["minimum_effect"] == 0.01
+    prob_min = data["probability_b_exceeds_a_by_minimum_effect"]
+    prob_sup = data["probability_b_greater_than_a"]
+    assert 0.0 <= prob_min <= 1.0
+    assert prob_min <= prob_sup
+
+
+def test_bayesian_endpoint_validation_errors():
+    """Verify that invalid Bayesian requests are rejected with HTTP 422 Unprocessable Entity."""
+    base_valid = {
+        "conversions_a": 20,
+        "visitors_a": 200,
+        "conversions_b": 25,
+        "visitors_b": 200,
+    }
+
+    # Zero visitors
+    res1 = client.post("/api/experiment/bayesian", json={**base_valid, "visitors_a": 0})
+    assert res1.status_code == 422
+
+    # Negative counts
+    res2 = client.post("/api/experiment/bayesian", json={**base_valid, "conversions_a": -1})
+    assert res2.status_code == 422
+
+    # Conversions > visitors
+    res3 = client.post("/api/experiment/bayesian", json={**base_valid, "conversions_a": 205})
+    assert res3.status_code == 422
+
+    # Boolean counts
+    res4 = client.post("/api/experiment/bayesian", json={**base_valid, "conversions_a": True})
+    assert res4.status_code == 422
+    res5 = client.post("/api/experiment/bayesian", json={**base_valid, "visitors_b": False})
+    assert res5.status_code == 422
+
+    # Non-positive prior parameters
+    res6 = client.post("/api/experiment/bayesian", json={**base_valid, "prior_alpha": 0.0})
+    assert res6.status_code == 422
+    res7 = client.post("/api/experiment/bayesian", json={**base_valid, "prior_beta": -1.0})
+    assert res7.status_code == 422
+    res8 = client.post("/api/experiment/bayesian", json={**base_valid, "prior_alpha": True})
+    assert res8.status_code == 422
+
+    # Out of range credible interval
+    res9 = client.post("/api/experiment/bayesian", json={**base_valid, "credible_interval": 0.0})
+    assert res9.status_code == 422
+    res10 = client.post("/api/experiment/bayesian", json={**base_valid, "credible_interval": 1.0})
+    assert res10.status_code == 422
+    res11 = client.post("/api/experiment/bayesian", json={**base_valid, "credible_interval": 1.05})
+    assert res11.status_code == 422
+
+    # Out of range minimum effect
+    res12 = client.post("/api/experiment/bayesian", json={**base_valid, "minimum_effect": -0.05})
+    assert res12.status_code == 422
+    res13 = client.post("/api/experiment/bayesian", json={**base_valid, "minimum_effect": 1.05})
+    assert res13.status_code == 422
+    res14 = client.post("/api/experiment/bayesian", json={**base_valid, "minimum_effect": True})
+    assert res14.status_code == 422
+
+    # Missing mandatory fields
+    res15 = client.post("/api/experiment/bayesian", json={"conversions_a": 10})
+    assert res15.status_code == 422
 

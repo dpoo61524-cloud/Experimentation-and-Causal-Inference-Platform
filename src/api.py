@@ -6,7 +6,7 @@ Exposes statistical engine functionality for A/B testing and sample size estimat
 import math
 from pathlib import Path
 import sys
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -25,6 +25,7 @@ from statistics_engine import (
     chi_square_test,
     sequential_conversion_test,
 )
+from bayesian_engine import bayesian_ab_test
 
 app = FastAPI(
     title="Experimentation and Causal Inference Platform API",
@@ -651,6 +652,187 @@ async def run_sequential_endpoint(
             alpha=payload.alpha,
             evaluate_futility=payload.evaluate_futility,
             schedule_tolerance=payload.schedule_tolerance,
+        )
+        return results
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+
+class BayesianTestRequest(BaseModel):
+    conversions_a: int = Field(
+        ...,
+        description="Number of conversions in Group A (non-negative integer <= visitors_a)",
+        examples=[45],
+    )
+    visitors_a: int = Field(
+        ...,
+        description="Total number of visitors in Group A (positive integer >= 1)",
+        examples=[500],
+    )
+    conversions_b: int = Field(
+        ...,
+        description="Number of conversions in Group B (non-negative integer <= visitors_b)",
+        examples=[60],
+    )
+    visitors_b: int = Field(
+        ...,
+        description="Total number of visitors in Group B (positive integer >= 1)",
+        examples=[500],
+    )
+    prior_alpha: float = Field(
+        default=1.0,
+        description="Positive Beta prior alpha parameter (pseudo-conversions). Default is 1.0 (flat prior).",
+        examples=[1.0],
+    )
+    prior_beta: float = Field(
+        default=1.0,
+        description="Positive Beta prior beta parameter (pseudo-non-conversions). Default is 1.0 (flat prior).",
+        examples=[1.0],
+    )
+    credible_interval: float = Field(
+        default=0.95,
+        description="Credible interval mass strictly between 0 and 1. Default is 0.95 (95% CI).",
+        examples=[0.95],
+    )
+    minimum_effect: float = Field(
+        default=0.0,
+        description="Minimum practically meaningful absolute improvement (B minus A), between 0 and 1 inclusive. Default is 0.0.",
+        examples=[0.0],
+    )
+
+    @field_validator("conversions_a", "visitors_a", "conversions_b", "visitors_b", mode="before")
+    @classmethod
+    def check_strictly_integer(cls, value: Any, info: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError(f"{info.field_name} must be an integer, not a boolean.")
+        if isinstance(value, float):
+            if not value.is_integer():
+                raise ValueError(f"{info.field_name} must be a whole integer.")
+            value = int(value)
+        return value
+
+    @field_validator("prior_alpha", "prior_beta", "credible_interval", "minimum_effect", mode="before")
+    @classmethod
+    def check_strictly_number(cls, value: Any, info: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError(f"{info.field_name} must be a number, not a boolean.")
+        return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def handle_input_aliases(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # Support nested group_a / group_b format
+            if "group_a" in data and isinstance(data["group_a"], dict):
+                if "conversions_a" not in data:
+                    data["conversions_a"] = data["group_a"].get("conversions")
+                if "visitors_a" not in data:
+                    data["visitors_a"] = data["group_a"].get("visitors")
+            if "group_b" in data and isinstance(data["group_b"], dict):
+                if "conversions_b" not in data:
+                    data["conversions_b"] = data["group_b"].get("conversions")
+                if "visitors_b" not in data:
+                    data["visitors_b"] = data["group_b"].get("visitors")
+            # Support control / treatment format
+            if "control" in data and isinstance(data["control"], dict):
+                if "conversions_a" not in data:
+                    data["conversions_a"] = data["control"].get("conversions")
+                if "visitors_a" not in data:
+                    data["visitors_a"] = data["control"].get("visitors")
+            if "treatment" in data and isinstance(data["treatment"], dict):
+                if "conversions_b" not in data:
+                    data["conversions_b"] = data["treatment"].get("conversions")
+                if "visitors_b" not in data:
+                    data["visitors_b"] = data["treatment"].get("visitors")
+        return data
+
+    @model_validator(mode="after")
+    def validate_bayesian_inputs(self) -> "BayesianTestRequest":
+        if self.visitors_a <= 0:
+            raise ValueError("visitors_a must be at least 1 (each group must have at least one visitor).")
+        if self.visitors_b <= 0:
+            raise ValueError("visitors_b must be at least 1 (each group must have at least one visitor).")
+        if self.conversions_a < 0:
+            raise ValueError("conversions_a cannot be negative.")
+        if self.conversions_b < 0:
+            raise ValueError("conversions_b cannot be negative.")
+        if self.conversions_a > self.visitors_a:
+            raise ValueError(f"conversions_a ({self.conversions_a}) cannot exceed visitors_a ({self.visitors_a}).")
+        if self.conversions_b > self.visitors_b:
+            raise ValueError(f"conversions_b ({self.conversions_b}) cannot exceed visitors_b ({self.visitors_b}).")
+        if not math.isfinite(self.prior_alpha) or self.prior_alpha <= 0:
+            raise ValueError("prior_alpha must be a finite positive number (> 0).")
+        if not math.isfinite(self.prior_beta) or self.prior_beta <= 0:
+            raise ValueError("prior_beta must be a finite positive number (> 0).")
+        if not math.isfinite(self.credible_interval) or not (0 < self.credible_interval < 1):
+            raise ValueError("credible_interval must be strictly between 0 and 1 (exclusive).")
+        if not math.isfinite(self.minimum_effect) or not (0 <= self.minimum_effect <= 1):
+            raise ValueError("minimum_effect must be between 0 and 1, inclusive.")
+        return self
+
+
+class BayesianTestResponse(BaseModel):
+    visitors_a: int = Field(..., description="Total visitors in Group A")
+    conversions_a: int = Field(..., description="Conversions in Group A")
+    conversion_rate_a: float = Field(..., description="Observed conversion rate of Group A")
+    observed_conversion_rate_a: float = Field(..., description="Observed conversion rate of Group A")
+    visitors_b: int = Field(..., description="Total visitors in Group B")
+    conversions_b: int = Field(..., description="Conversions in Group B")
+    conversion_rate_b: float = Field(..., description="Observed conversion rate of Group B")
+    observed_conversion_rate_b: float = Field(..., description="Observed conversion rate of Group B")
+    observed_absolute_difference: float = Field(..., description="Observed difference (B minus A)")
+    observed_difference: float = Field(..., description="Observed difference (B minus A)")
+    prior_alpha: float = Field(..., description="Prior alpha parameter used")
+    prior_beta: float = Field(..., description="Prior beta parameter used")
+    posterior_alpha_a: float = Field(..., description="Updated posterior alpha for Group A")
+    posterior_beta_a: float = Field(..., description="Updated posterior beta for Group A")
+    posterior_alpha_b: float = Field(..., description="Updated posterior alpha for Group B")
+    posterior_beta_b: float = Field(..., description="Updated posterior beta for Group B")
+    posterior_mean_a: float = Field(..., description="Posterior mean conversion rate for Group A")
+    posterior_mean_b: float = Field(..., description="Posterior mean conversion rate for Group B")
+    credible_interval_a: List[float] = Field(..., description="Equal-tailed credible interval for Group A rate")
+    credible_interval_b: List[float] = Field(..., description="Equal-tailed credible interval for Group B rate")
+    posterior_mean_difference: float = Field(..., description="Posterior mean difference (B minus A)")
+    credible_interval_difference: List[float] = Field(..., description="Credible interval for difference (B minus A)")
+    probability_b_greater_than_a: float = Field(..., description="Posterior probability that B > A")
+    probability_b_exceeds_a_by_minimum_effect: float = Field(
+        ..., description="Posterior probability that B exceeds A by at least minimum_effect"
+    )
+    credible_interval_level: float = Field(..., description="Configured credible interval probability mass")
+    credible_interval: float = Field(..., description="Configured credible interval probability mass")
+    minimum_effect: float = Field(..., description="Configured minimum practical effect threshold")
+    simulation_method: str = Field(..., description="Method used for difference distribution estimation")
+    num_samples: int = Field(..., description="Number of Monte Carlo samples drawn")
+    random_seed: Optional[int] = Field(None, description="Random seed used for reproducibility")
+
+
+@app.post(
+    "/api/experiment/bayesian",
+    response_model=BayesianTestResponse,
+    tags=["Experimentation"],
+    summary="Bayesian A/B testing for conversion rates",
+)
+async def run_bayesian_endpoint(
+    payload: BayesianTestRequest,
+) -> Dict[str, Any]:
+    """Perform a Bayesian A/B test for conversion rates using a Beta-Binomial conjugate model.
+
+    Updates Beta priors with observed conversion counts and estimates posterior means,
+    credible intervals, and probability of superiority via Monte Carlo simulation.
+    """
+    try:
+        results = bayesian_ab_test(
+            conversions_a=payload.conversions_a,
+            visitors_a=payload.visitors_a,
+            conversions_b=payload.conversions_b,
+            visitors_b=payload.visitors_b,
+            prior_alpha=payload.prior_alpha,
+            prior_beta=payload.prior_beta,
+            credible_interval=payload.credible_interval,
+            minimum_effect=payload.minimum_effect,
         )
         return results
     except ValueError as exc:
