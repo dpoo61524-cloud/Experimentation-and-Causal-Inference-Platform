@@ -365,3 +365,136 @@ def validate_causal_data(
         "rows_dropped": rows_dropped,
         "validated_data": df,
     }
+
+
+def estimate_unadjusted_ate(
+    data: Any,
+    treatment_col: str,
+    outcome_col: str,
+    confounder_cols: Optional[Sequence[str]] = None,
+    treated_value: Optional[Any] = None,
+    untreated_value: Optional[Any] = None,
+    drop_missing: bool = False,
+) -> Dict[str, Any]:
+    """Estimate the unadjusted Average Treatment Effect (ATE) as the difference in sample outcome means.
+
+    Methodology & Formula:
+    ----------------------
+    The unadjusted ATE estimator computes the difference between the mean outcome of the
+    treated group and the mean outcome of the control/untreated group:
+
+        ATE_unadjusted = mean(Y | T = 1) - mean(Y | T = 0)
+
+    where:
+    - mean(Y | T = 1) is the sample average of the outcome among treated units.
+    - mean(Y | T = 0) is the sample average of the outcome among control units.
+
+    Causal Identification & Confounding Disclaimer:
+    ------------------------------------------------
+    - In a fully randomized controlled trial (RCT) with compliant subjects, treatment assignment
+      T is independent of potential outcomes (Y(1), Y(0) ⫫ T). Under these conditions, the
+      unadjusted difference in means is an unbiased and consistent estimator of the true
+      Average Treatment Effect: E[Y(1) - Y(0)].
+    - In observational studies or non-randomized settings, treatment assignment is typically
+      correlated with confounding covariates X. The observed difference in means equals:
+          E[Y | T = 1] - E[Y | T = 0] = ATE + Selection Bias / Confounding Bias
+      This estimator does NOT control or adjust for observed confounders.
+    - Important: This function does NOT prove causality or eliminate confounding bias.
+      For observational data, adjustment methods (such as regression adjustment, propensity
+      score matching, or weighting) are generally required.
+    - Note: In this baseline task, this function returns the unadjusted point estimate only.
+      Hypothesis testing p-values and confidence intervals are not computed here.
+
+    Parameters:
+    -----------
+    data : pd.DataFrame, Dict[str, Sequence], or List[Dict[str, Any]]
+        The tabular dataset to analyze.
+    treatment_col : str
+        Name of the binary treatment column.
+    outcome_col : str
+        Name of the numeric outcome column.
+    confounder_cols : Sequence[str], optional
+        Optional names of observed confounder/covariate columns to validate alongside data.
+    treated_value : Any, optional
+        Label identifying the treated group. If None, inferred automatically for binary data.
+    untreated_value : Any, optional
+        Label identifying the control group. If None, inferred automatically for binary data.
+    drop_missing : bool, default False
+        Explicit missing data policy (reused from validate_causal_data):
+        - If False (default): raises ValueError if any missing values exist in analysis columns.
+        - If True: drops rows containing missing values and records the count.
+
+    Returns:
+    --------
+    Dict[str, Any]
+        Structured dictionary containing:
+        - 'estimator': 'unadjusted_difference_in_means'
+        - 'ate': Unadjusted average treatment effect estimate (treated mean - control mean)
+        - 'unadjusted_ate': Alias for 'ate'
+        - 'mean_outcome_treated': Mean outcome in the treated group
+        - 'mean_outcome_control': Mean outcome in the control/untreated group
+        - 'outcome_mean_treated': Alias for mean_outcome_treated
+        - 'outcome_mean_untreated': Alias for mean_outcome_control
+        - 'difference_in_means': Alias for 'ate'
+        - 'n_total': Total number of validated observations
+        - 'n_treated': Count of treated observations
+        - 'n_control': Count of control observations
+        - 'n_untreated': Alias for 'n_control'
+        - 'treatment_col': Treatment column name
+        - 'outcome_col': Outcome column name
+        - 'confounder_cols': List of validated confounder column names
+        - 'treated_value': Value representing the treated condition
+        - 'untreated_value': Value representing the control condition
+        - 'control_value': Alias for 'untreated_value'
+        - 'rows_dropped': Number of rows dropped due to missing data (0 if drop_missing=False)
+        - 'assumptions': Educational explanation of identifying assumptions and confounding limitations
+
+    Raises:
+    -------
+    ValueError:
+        If the data fails any structural, treatment, outcome, or confounder validation rules
+        enforced by validate_causal_data.
+    """
+    # 1. Reuse validate_causal_data for comprehensive prerequisite verification
+    v = validate_causal_data(
+        data=data,
+        treatment_col=treatment_col,
+        outcome_col=outcome_col,
+        confounder_cols=confounder_cols,
+        treated_value=treated_value,
+        untreated_value=untreated_value,
+        drop_missing=drop_missing,
+    )
+
+    mean_treated = float(v["outcome_mean_treated"])
+    mean_control = float(v["outcome_mean_untreated"])
+    ate = float(mean_treated - mean_control)
+
+    assumptions_text = (
+        "Unadjusted difference in means reflects the true Average Treatment Effect (ATE) only under "
+        "randomized treatment assignment (exchangeability: (Y(1), Y(0)) ⫫ T). In observational data, "
+        "confounding bias can distort this estimate, and this estimator does not adjust for confounders."
+    )
+
+    return {
+        "estimator": "unadjusted_difference_in_means",
+        "ate": ate,
+        "unadjusted_ate": ate,
+        "difference_in_means": ate,
+        "mean_outcome_treated": mean_treated,
+        "mean_outcome_control": mean_control,
+        "outcome_mean_treated": mean_treated,
+        "outcome_mean_untreated": mean_control,
+        "n_total": int(v["n_total"]),
+        "n_treated": int(v["n_treated"]),
+        "n_control": int(v["n_untreated"]),
+        "n_untreated": int(v["n_untreated"]),
+        "treatment_col": v["treatment_col"],
+        "outcome_col": v["outcome_col"],
+        "confounder_cols": v["confounder_cols"],
+        "treated_value": v["treated_value"],
+        "control_value": v["untreated_value"],
+        "untreated_value": v["untreated_value"],
+        "rows_dropped": int(v["rows_dropped"]),
+        "assumptions": assumptions_text,
+    }

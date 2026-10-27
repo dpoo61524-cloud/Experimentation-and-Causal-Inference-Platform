@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from causal_engine import validate_causal_data
+from causal_engine import validate_causal_data, estimate_unadjusted_ate
 
 
 # ============================================================================
@@ -329,3 +329,181 @@ def test_categorical_confounder_with_strings():
     res = validate_causal_data(df, "t", "y", confounder_cols=["city", "income"])
     assert res["categorical_confounders"] == ["city"]
     assert res["numeric_confounders"] == ["income"]
+
+
+# ============================================================================
+# 7. Unadjusted Average Treatment Effect (ATE) Estimator Tests
+# ============================================================================
+
+def test_estimate_unadjusted_ate_known_numerical_example():
+    """Verify unadjusted ATE against a known, manually calculable numerical example.
+
+    Treated outcomes: [12.0, 14.0, 16.0] -> mean = 14.0
+    Control outcomes: [6.0, 8.0]        -> mean = 7.0
+    Expected ATE: 14.0 - 7.0 = 7.0
+    """
+    df = pd.DataFrame({
+        "treated": [1, 1, 1, 0, 0],
+        "outcome": [12.0, 14.0, 16.0, 6.0, 8.0],
+    })
+
+    res = estimate_unadjusted_ate(df, treatment_col="treated", outcome_col="outcome")
+
+    assert res["estimator"] == "unadjusted_difference_in_means"
+    assert res["ate"] == pytest.approx(7.0)
+    assert res["unadjusted_ate"] == pytest.approx(7.0)
+    assert res["difference_in_means"] == pytest.approx(7.0)
+    assert res["mean_outcome_treated"] == pytest.approx(14.0)
+    assert res["mean_outcome_control"] == pytest.approx(7.0)
+    assert res["outcome_mean_treated"] == pytest.approx(14.0)
+    assert res["outcome_mean_untreated"] == pytest.approx(7.0)
+    assert res["n_total"] == 5
+    assert res["n_treated"] == 3
+    assert res["n_control"] == 2
+    assert res["n_untreated"] == 2
+    assert res["rows_dropped"] == 0
+    assert "confounding" in res["assumptions"].lower()
+
+
+def test_estimate_unadjusted_ate_equal_means():
+    """Verify unadjusted ATE equals 0.0 when treated and control outcome means are identical."""
+    df = pd.DataFrame({
+        "t": [1, 1, 0, 0],
+        "y": [10.0, 10.0, 10.0, 10.0],
+    })
+
+    res = estimate_unadjusted_ate(df, treatment_col="t", outcome_col="y")
+    assert res["ate"] == pytest.approx(0.0)
+    assert res["mean_outcome_treated"] == pytest.approx(10.0)
+    assert res["mean_outcome_control"] == pytest.approx(10.0)
+
+
+def test_estimate_unadjusted_ate_negative_effect():
+    """Verify unadjusted ATE correctly calculates a negative treatment effect estimate.
+
+    Treated outcomes: [2.0, 4.0]  -> mean = 3.0
+    Control outcomes: [8.0, 10.0] -> mean = 9.0
+    Expected ATE: 3.0 - 9.0 = -6.0
+    """
+    df = pd.DataFrame({
+        "t": [1, 1, 0, 0],
+        "y": [2.0, 4.0, 8.0, 10.0],
+    })
+
+    res = estimate_unadjusted_ate(df, treatment_col="t", outcome_col="y")
+    assert res["ate"] == pytest.approx(-6.0)
+    assert res["mean_outcome_treated"] == pytest.approx(3.0)
+    assert res["mean_outcome_control"] == pytest.approx(9.0)
+
+
+def test_estimate_unadjusted_ate_unequal_group_sizes():
+    """Verify unadjusted ATE calculation with substantially unequal group sizes."""
+    # 10 treated units with mean 25.0, 2 control units with mean 15.0
+    treated_y = [25.0] * 10
+    control_y = [10.0, 20.0]  # mean = 15.0
+
+    df = pd.DataFrame({
+        "treatment": [1] * 10 + [0] * 2,
+        "revenue": treated_y + control_y,
+    })
+
+    res = estimate_unadjusted_ate(df, treatment_col="treatment", outcome_col="revenue")
+    assert res["n_total"] == 12
+    assert res["n_treated"] == 10
+    assert res["n_control"] == 2
+    assert res["mean_outcome_treated"] == pytest.approx(25.0)
+    assert res["mean_outcome_control"] == pytest.approx(15.0)
+    assert res["ate"] == pytest.approx(10.0)
+
+
+def test_estimate_unadjusted_ate_difference_direction_treated_minus_control():
+    """Verify that difference direction is strictly treated mean minus control mean."""
+    # Custom labels: "Active" treated vs "Placebo" control
+    df = pd.DataFrame({
+        "drug": ["Active", "Active", "Placebo", "Placebo"],
+        "pain_score": [3.0, 5.0, 8.0, 10.0],  # Active mean=4.0, Placebo mean=9.0
+    })
+
+    res = estimate_unadjusted_ate(
+        df,
+        treatment_col="drug",
+        outcome_col="pain_score",
+        treated_value="Active",
+        untreated_value="Placebo",
+    )
+
+    # Pain reduction: Active (4.0) - Placebo (9.0) = -5.0
+    assert res["ate"] == pytest.approx(-5.0)
+    assert res["treated_value"] == "Active"
+    assert res["control_value"] == "Placebo"
+
+
+def test_estimate_unadjusted_ate_group_counts_and_means_correct():
+    """Verify exact count and mean integrity across multiple sample observations."""
+    df = pd.DataFrame({
+        "t": [0, 1, 0, 1, 0, 1],
+        "y": [1.0, 2.0, 3.0, 6.0, 5.0, 10.0],
+    })
+    # Control: [1.0, 3.0, 5.0] -> mean = 3.0, count = 3
+    # Treated: [2.0, 6.0, 10.0] -> mean = 6.0, count = 3
+    res = estimate_unadjusted_ate(df, treatment_col="t", outcome_col="y")
+    assert res["n_total"] == 6
+    assert res["n_treated"] == 3
+    assert res["n_control"] == 3
+    assert res["mean_outcome_treated"] == pytest.approx(6.0)
+    assert res["mean_outcome_control"] == pytest.approx(3.0)
+    assert res["ate"] == pytest.approx(3.0)
+
+
+def test_estimate_unadjusted_ate_reuses_validation_behavior():
+    """Verify that estimate_unadjusted_ate reuses validation for missing columns and empty datasets."""
+    # Missing column
+    df = pd.DataFrame({"t": [1, 0], "y": [5.0, 6.0]})
+    with pytest.raises(ValueError, match="Treatment column 'missing_t' not found"):
+        estimate_unadjusted_ate(df, treatment_col="missing_t", outcome_col="y")
+
+    # Empty dataset
+    with pytest.raises(ValueError, match="Dataset is empty"):
+        estimate_unadjusted_ate(pd.DataFrame(), treatment_col="t", outcome_col="y")
+
+
+def test_estimate_unadjusted_ate_missing_data_policy():
+    """Verify missing data policy: reject by default, drop and track when drop_missing=True."""
+    df_missing = pd.DataFrame({
+        "t": [1, 0, 1, 0, 1],
+        "y": [10.0, 5.0, np.nan, 7.0, 12.0],
+    })
+
+    # Default: raises ValueError
+    with pytest.raises(ValueError, match="Dataset contains missing values"):
+        estimate_unadjusted_ate(df_missing, treatment_col="t", outcome_col="y", drop_missing=False)
+
+    # Explicit drop: drops row 2 (leaving 2 treated, 2 control)
+    res = estimate_unadjusted_ate(df_missing, treatment_col="t", outcome_col="y", drop_missing=True)
+    assert res["rows_dropped"] == 1
+    assert res["n_total"] == 4
+    assert res["n_treated"] == 2
+    assert res["n_control"] == 2
+    # Treated: [10.0, 12.0] -> mean = 11.0
+    # Control: [5.0, 7.0] -> mean = 6.0
+    assert res["mean_outcome_treated"] == pytest.approx(11.0)
+    assert res["mean_outcome_control"] == pytest.approx(6.0)
+    assert res["ate"] == pytest.approx(5.0)
+
+
+def test_estimate_unadjusted_ate_invalid_treatment_or_outcome_errors():
+    """Verify that invalid treatment or outcome types raise clear ValueErrors."""
+    # Ternary treatment
+    df_ternary = pd.DataFrame({"t": [0, 1, 2, 0], "y": [1.0, 2.0, 3.0, 4.0]})
+    with pytest.raises(ValueError, match="must be binary"):
+        estimate_unadjusted_ate(df_ternary, treatment_col="t", outcome_col="y")
+
+    # Non-numeric string outcome
+    df_string_y = pd.DataFrame({"t": [1, 0], "y": ["good", "bad"]})
+    with pytest.raises(ValueError, match="contains non-numeric values"):
+        estimate_unadjusted_ate(df_string_y, treatment_col="t", outcome_col="y")
+
+    # Boolean outcome
+    df_bool_y = pd.DataFrame({"t": [1, 0], "y": [True, False]})
+    with pytest.raises(ValueError, match="must be numeric, but contains boolean values"):
+        estimate_unadjusted_ate(df_bool_y, treatment_col="t", outcome_col="y")
