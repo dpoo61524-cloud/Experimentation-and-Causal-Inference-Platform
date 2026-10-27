@@ -10,6 +10,7 @@ A Python platform for A/B testing, causal inference, and statistical analysis, f
 - **Independent Two-Sample Welch's t-Test**: Hypothesis testing for continuous metrics (e.g., revenue per user, pages viewed, session duration) without assuming equal variances.
 - **Chi-Square Test of Independence**: Pearson's chi-square test on $r \times c$ contingency tables for categorical outcomes, complete with expected frequency evaluation and small-sample warnings.
 - **Group-Sequential Testing Engine**: Discrete O'Brien–Fleming (1979) design with exact canonical multivariate normal boundary calculation across $K \in \{2, 3, 4, 5\}$ interim looks to control overall Type I error ($\alpha \in \{0.01, 0.05, 0.10\}$). Features schedule enforcement, planned vs observed information fraction auditing, non-binding futility heuristics, and statistically sound decisions without false "proof of no effect" claims.
+- **Bayesian A/B Testing Engine**: Beta-Binomial conjugate model for conversion rates with independent Beta priors (default Beta(1, 1)). Computes analytical posterior means, exact Beta credible intervals, posterior probability of superiority $P(B > A)$, probability of practical improvement $P(B - A \ge \delta)$ exceeding a minimum practical effect threshold, and reproducible Monte Carlo credible intervals for conversion differences.
 - **Sample Size Estimation**: Power analysis (`NormalIndPower`) to determine required sample size per group and total sample size given baseline rate, expected rate, alpha, and power.
 - **Multiple Comparisons Corrections**: Family-wise error rate control using Bonferroni and Benjamini-Hochberg (FDR) adjustments.
 - **Automated Experiment Reporting**: Human-readable terminal output and CSV exports of experiment findings.
@@ -401,6 +402,186 @@ curl -X POST http://127.0.0.1:8000/api/experiment/sequential \
   "decision": "stop_max_sample_size_inconclusive",
   "explanation": "Maximum planned sample size reached at final checkpoint 5/5. Test statistic |Z|=0.3643 did not cross the final critical boundary Z_crit=2.0401. The experiment fails to reject the null hypothesis at overall alpha=0.05; this represents inconclusive evidence, NOT proof that the treatment has no effect."
 }
+```
+
+---
+
+## Bayesian A/B Testing
+
+### 1. What Bayesian A/B Testing Does
+
+In classical (frequentist) hypothesis testing, experiments center on $p$-values and null hypotheses ($H_0$). A frequentist $p$-value calculates how unlikely the observed data would be if there were truly zero effect. However, practitioners and decision-makers often want direct answers to practical questions:
+- *What is the probability that Treatment B is actually better than Control A?*
+- *What is the probability that Treatment B beats Control A by at least a meaningful business threshold (e.g., 1 percentage point)?*
+- *What is the credible range of true conversion rates given our data and assumptions?*
+
+Bayesian A/B testing answers these questions directly by treating conversion rates as random variables characterized by probability distributions. Using prior information and observed experimental data, it calculates the **posterior distribution** for each group's conversion rate.
+
+#### Key Concepts & Distinctions
+- **Observed Conversion Rate**: The raw sample fraction ($c / n$). It reflects only the empirical data collected in the current sample and can fluctuate substantially when sample size $n$ is small.
+- **Posterior Mean Conversion Rate**: The expected value of the true conversion rate under the posterior distribution:
+  $$\mathbb{E}[p] = \frac{\alpha_{\text{post}}}{\alpha_{\text{post}} + \beta_{\text{post}}}$$
+  Under a flat $\text{Beta}(1, 1)$ prior, this becomes $(c + 1) / (n + 2)$ (Laplace's rule of succession), providing gentle regularization toward 0.5 when sample sizes are small.
+- **Posterior Probability of Superiority ($P(B > A)$)**: The posterior probability that Group B's true underlying conversion rate is strictly greater than Group A's ($P(p_B > p_A)$).
+- **Probability of Meaningful Improvement ($P(B - A \ge \delta)$)**: The posterior probability that Group B outperforms Group A by at least a user-specified minimum practical effect threshold $\delta$ (`minimum_effect`).
+
+> [!IMPORTANT]
+> **Probabilistic Belief vs. Future Guarantee**: Posterior probabilities represent the state of belief about true parameters under the specified model and prior assumptions. They are **not guarantees of future business performance**, nor do they guarantee financial returns.
+
+---
+
+### 2. Beta-Binomial Model
+
+The platform uses the conjugate **Beta-Binomial model** for conversion rate experiments:
+
+1. **Likelihood**: In a conversion experiment with $n$ visitors and $c$ conversions, each visitor outcome is modeled as an independent Bernoulli trial. The cumulative conversions follow a Binomial likelihood:
+   $$c \sim \text{Binomial}(n, p)$$
+2. **Conjugate Prior**: The Beta distribution is the conjugate prior for the Binomial likelihood:
+   $$p \sim \text{Beta}(\alpha_{\text{prior}}, \beta_{\text{prior}})$$
+3. **Posterior Update**: Observing $c$ conversions and $n - c$ non-conversions updates the parameters in closed form:
+   $$\alpha_{\text{post}} = \alpha_{\text{prior}} + c$$
+   $$\beta_{\text{post}} = \beta_{\text{prior}} + (n - c)$$
+   The resulting posterior distribution is:
+   $$p \sim \text{Beta}(\alpha_{\text{post}}, \beta_{\text{post}})$$
+
+#### Prior Parameter Interpretation
+- $\alpha_{\text{prior}}$ represents prior pseudo-conversions ("successes").
+- $\beta_{\text{prior}}$ represents prior pseudo-non-conversions ("failures").
+- **Default Prior**: $\text{Beta}(1, 1)$, a uniform distribution over $[0, 1]$ providing an uninformative, flat initial belief that assigns equal prior density across all possible conversion rates.
+- **Custom Priors**: Users can supply alternative positive hyperparameters ($\alpha, \beta > 0$) reflecting historical baseline rates (e.g., $\text{Beta}(10, 90)$ for a prior centered around 10%) or Jeffreys uninformative prior $\text{Beta}(0.5, 0.5)$. Prior parameters represent model weights, not literal customer records.
+
+---
+
+### 3. Endpoint Details
+
+- **Method & Route**: `POST /api/experiment/bayesian`
+- **Summary**: Bayesian A/B testing for conversion rates
+- **Tags**: `["Experimentation"]`
+
+#### Supported Request Parameters
+| Parameter | Type | Required / Default | Constraints & Range | Description |
+|:---|:---:|:---:|:---|:---|
+| `conversions_a` | `int` | **Required** | Integer $\ge 0$, $\le \text{visitors\_a}$ | Number of conversions in Group A (Control). Booleans and non-integers are rejected. |
+| `visitors_a` | `int` | **Required** | Integer $\ge 1$ | Total visitors in Group A (Control). Booleans and non-integers are rejected. |
+| `conversions_b` | `int` | **Required** | Integer $\ge 0$, $\le \text{visitors\_b}$ | Number of conversions in Group B (Treatment). Booleans and non-integers are rejected. |
+| `visitors_b` | `int` | **Required** | Integer $\ge 1$ | Total visitors in Group B (Treatment). Booleans and non-integers are rejected. |
+| `prior_alpha` | `float` | Optional (`1.0`) | Finite number $> 0$ | Beta prior pseudo-conversions $\alpha$. |
+| `prior_beta` | `float` | Optional (`1.0`) | Finite number $> 0$ | Beta prior pseudo-non-conversions $\beta$. |
+| `credible_interval` | `float` | Optional (`0.95`) | Finite number $\in (0, 1)$ | Credible interval probability mass (e.g., 0.95 for a 95% CI). |
+| `minimum_effect` | `float` | Optional (`0.0`) | Finite number $\in [0.0, 1.0]$ | Minimum practically meaningful absolute difference ($B - A$). |
+
+*Note: In addition to flat parameters, structured nested objects (`{"group_a": {...}, "group_b": {...}}` or `{"control": {...}, "treatment": {...}}`) are supported via model validation.*
+
+#### Validation & Error Behavior
+- Schema violations, missing required fields, boolean counts, or out-of-range floats produce an **HTTP 422 Unprocessable Entity** response.
+- Statistical domain errors produce an **HTTP 400 Bad Request** response.
+
+---
+
+### 4. Example Request
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/experiment/bayesian \
+  -H "Content-Type: application/json" \
+  -d '{
+    "conversions_a": 45,
+    "visitors_a": 500,
+    "conversions_b": 60,
+    "visitors_b": 500,
+    "prior_alpha": 1.0,
+    "prior_beta": 1.0,
+    "credible_interval": 0.95,
+    "minimum_effect": 0.01
+  }'
+```
+
+---
+
+### 5. Example Response (200 OK)
+
+```json
+{
+  "visitors_a": 500,
+  "conversions_a": 45,
+  "conversion_rate_a": 0.09,
+  "observed_conversion_rate_a": 0.09,
+  "visitors_b": 500,
+  "conversions_b": 60,
+  "conversion_rate_b": 0.12,
+  "observed_conversion_rate_b": 0.12,
+  "observed_absolute_difference": 0.03,
+  "observed_difference": 0.03,
+  "prior_alpha": 1.0,
+  "prior_beta": 1.0,
+  "posterior_alpha_a": 46.0,
+  "posterior_beta_a": 456.0,
+  "posterior_alpha_b": 61.0,
+  "posterior_beta_b": 441.0,
+  "posterior_mean_a": 0.091633,
+  "posterior_mean_b": 0.121514,
+  "posterior_mean_difference": 0.02988,
+  "credible_interval_a": [0.068305, 0.118672],
+  "credible_interval_b": [0.094592, 0.151746],
+  "credible_interval_difference": [-0.009384, 0.069486],
+  "probability_b_greater_than_a": 0.93179,
+  "probability_b_exceeds_a_by_minimum_effect": 0.83515,
+  "credible_interval_level": 0.95,
+  "credible_interval": 0.95,
+  "minimum_effect": 0.01,
+  "simulation_method": "monte_carlo",
+  "num_samples": 100000,
+  "random_seed": 42
+}
+```
+
+---
+
+### 6. Response Interpretation
+
+- **Posterior Parameters & Regularization**:
+  - Group A: $\alpha_{\text{post}} = 1 + 45 = 46$, $\beta_{\text{post}} = 1 + (500 - 45) = 456$. Posterior mean is $46 / 502 \approx 0.0916$ ($9.16\%$).
+  - Group B: $\alpha_{\text{post}} = 1 + 60 = 61$, $\beta_{\text{post}} = 1 + (500 - 60) = 441$. Posterior mean is $61 / 502 \approx 0.1215$ ($12.15\%$).
+  - Notice the regularizing effect of the uniform $\text{Beta}(1, 1)$ prior: observed rates ($9.00\%$ and $12.00\%$) are gently shrunk toward $9.16\%$ and $12.15\%$.
+- **Credible Intervals**:
+  - Individual group intervals are calculated via exact inverse cumulative distribution function (`ppf`) of each Beta distribution. For Group A, there is a 95% posterior probability that the true conversion rate lies between $6.83\%$ and $11.87\%$. For Group B, it lies between $9.46\%$ and $15.17\%$.
+- **Difference Direction & Interval**:
+  - The difference is defined as **Treatment ($B$) minus Control ($A$)**: $p_B - p_A$.
+  - The 95% credible interval for the difference is $[-0.0094, 0.0695]$, meaning that with 95% probability, Treatment B's true conversion rate is between $-0.94$ percentage points and $+6.95$ percentage points relative to Control A.
+- **Probability of Superiority**:
+  - `probability_b_greater_than_a` $\approx 0.9318$ (93.18%). Given the data and prior, there is a 93.18% posterior probability that Treatment B has a higher true conversion rate than Control A.
+- **Probability Exceeding Minimum Practical Effect**:
+  - `probability_b_exceeds_a_by_minimum_effect` $\approx 0.8352$ (83.52%). There is an 83.52% posterior probability that Treatment B beats Control A by at least 1 percentage point ($\delta = 0.01$).
+- **Units**:
+  - All rates, differences, and thresholds are expressed as **proportions** between `0.0` and `1.0`. For example, `0.01` represents one percentage point ($1\%$).
+
+---
+
+### 7. Assumptions & Limitations
+
+- **Independent Bernoulli Outcomes**: Assumes each visitor's conversion decision is an independent, identically distributed Bernoulli trial with no cross-user interference or multi-device duplicates.
+- **Stationary Conversion Rates**: Assumes true underlying conversion rates remain constant throughout the duration of the test, without unmodeled day-of-week seasonality or trend drift.
+- **Independent Beta Priors**: Assumes the prior beliefs for Group A and Group B conversion rates are statistically independent.
+- **Monte Carlo Simulation for Difference Distribution**: While group posterior means and individual credible intervals are exact analytical Beta calculations, the difference distribution $(p_B - p_A)$ and tail probabilities are computed via reproducible Monte Carlo simulation ($N = 100,000$ draws, default seed `42`). Simulation results are stable numerical approximations rather than exact closed-form solutions.
+- **Prior Sensitivity on Small Samples**: When sample sizes are small ($N < 50$), the choice of prior has an observable influence on the posterior mean and intervals. As sample sizes grow, observed data rapidly dominates the prior.
+- **Sound Experimental Design Required for Causal Inference**: Bayesian probabilities describe parameter uncertainty under the statistical model, but **do not prove causality** unless the experiment was conducted under sound randomized assignment without confounding, selection bias, or sample ratio mismatches.
+
+---
+
+### 8. Running Bayesian Tests
+
+Run the dedicated Bayesian engine unit tests and full automated test suite using the project's virtual environment:
+
+```powershell
+# Windows (PowerShell)
+.venv\Scripts\python.exe -m pytest tests/test_bayesian_engine.py -q
+.venv\Scripts\python.exe -m pytest tests/test_api.py -q
+.venv\Scripts\python.exe -m pytest -q
+```
+
+Or using standard pytest:
+```bash
+pytest tests/test_bayesian_engine.py -v
+pytest -v
 ```
 
 ---
