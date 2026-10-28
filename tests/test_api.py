@@ -1189,3 +1189,293 @@ def test_unadjusted_ate_single_group_or_insufficient_sample():
     assert res2.status_code == 422
 
 
+# --- Regression-Adjusted ATE Fixtures & Tests ---
+
+@pytest.fixture
+def example_regression_causal_payload():
+    """Deterministic payload generated from: outcome = 2 + 5 * treatment + 3 * age."""
+    t_vals = [1, 1, 1, 1, 0, 0, 0, 0]
+    a_vals = [20, 25, 30, 35, 22, 26, 32, 38]
+    data = [
+        {"treatment": t, "age": a, "outcome": 2.0 + 5.0 * t + 3.0 * a}
+        for t, a in zip(t_vals, a_vals)
+    ]
+    return {
+        "data": data,
+        "treatment_col": "treatment",
+        "outcome_col": "outcome",
+        "confounder_cols": ["age"],
+        "treated_value": 1,
+        "untreated_value": 0,
+        "drop_missing": False,
+    }
+
+
+def test_regression_adjusted_ate_success(example_regression_causal_payload):
+    """Verify HTTP 200, correct response schema, recovered known ATE=5.0, counterfactual means, and raw difference."""
+    response = client.post("/api/causal/regression-adjusted-ate", json=example_regression_causal_payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    # Core identification & estimates
+    assert data["estimator"] == "regression_adjusted_ate"
+    assert data["adjusted_ate"] == pytest.approx(5.0)
+    assert data["ate"] == pytest.approx(5.0)
+    assert data["unadjusted_ate"] == pytest.approx(-1.0)
+    assert data["raw_difference"] == pytest.approx(-1.0)
+    assert data["difference_in_means"] == pytest.approx(-1.0)
+
+    # Counterfactual predictions (G-computation)
+    assert data["mean_predicted_treated"] == pytest.approx(92.5)
+    assert data["mean_predicted_control"] == pytest.approx(87.5)
+    assert data["mean_predicted_treated"] - data["mean_predicted_control"] == pytest.approx(5.0)
+
+    # Sample statistics
+    assert data["mean_outcome_treated"] == pytest.approx(89.5)
+    assert data["mean_outcome_control"] == pytest.approx(90.5)
+    assert data["n_total"] == 8
+    assert data["n_treated"] == 4
+    assert data["n_control"] == 4
+    assert data["n_untreated"] == 4
+
+    # Model and feature metadata
+    assert data["r_squared"] == pytest.approx(1.0)
+    assert "const" in data["model_features"]
+    assert "treatment_indicator" in data["model_features"]
+    assert "age" in data["model_features"]
+    assert data["confounder_cols"] == ["age"]
+    assert data["numeric_confounders"] == ["age"]
+    assert data["categorical_confounders"] == []
+    assert data["rows_dropped"] == 0
+
+    # Interpretation & assumptions
+    assert "interpretation" in data
+    assert "assumptions" in data
+    assert "G-computation" in data["assumptions"]
+    assert "Conditional Exchangeability" in data["assumptions"]
+
+
+def test_regression_adjusted_ate_categorical_confounders():
+    """Verify regression adjustment with both continuous numeric and categorical confounders."""
+    # Outcome equation: Y = 5.0 + 4.0 * T + 2.0 * age + 10.0 * (city == 'NYC')
+    records = [
+        {"grp": 1, "age": 20, "city": "NYC", "outcome": 5.0 + 4.0 + 40.0 + 10.0},
+        {"grp": 1, "age": 30, "city": "LA",  "outcome": 5.0 + 4.0 + 60.0 + 0.0},
+        {"grp": 1, "age": 40, "city": "NYC", "outcome": 5.0 + 4.0 + 80.0 + 10.0},
+        {"grp": 1, "age": 25, "city": "CHI", "outcome": 5.0 + 4.0 + 50.0 + 0.0},
+        {"grp": 0, "age": 20, "city": "NYC", "outcome": 5.0 + 0.0 + 40.0 + 10.0},
+        {"grp": 0, "age": 30, "city": "LA",  "outcome": 5.0 + 0.0 + 60.0 + 0.0},
+        {"grp": 0, "age": 40, "city": "NYC", "outcome": 5.0 + 0.0 + 80.0 + 10.0},
+        {"grp": 0, "age": 25, "city": "CHI", "outcome": 5.0 + 0.0 + 50.0 + 0.0},
+    ]
+    payload = {
+        "data": records,
+        "treatment_col": "grp",
+        "outcome_col": "outcome",
+        "confounder_cols": ["age", "city"],
+    }
+    response = client.post("/api/causal/regression-adjusted-ate", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["adjusted_ate"] == pytest.approx(4.0)
+    assert data["numeric_confounders"] == ["age"]
+    assert data["categorical_confounders"] == ["city"]
+    assert any("city" in col for col in data["model_features"])
+    assert data["n_total"] == 8
+    assert data["n_treated"] == 4
+    assert data["n_control"] == 4
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ["data", "treatment_col", "outcome_col", "confounder_cols"],
+)
+def test_regression_adjusted_ate_missing_required_fields(example_regression_causal_payload, missing_field):
+    """Verify that omitting required request fields returns HTTP 422."""
+    payload = {k: v for k, v in example_regression_causal_payload.items() if k != missing_field}
+    response = client.post("/api/causal/regression-adjusted-ate", json=payload)
+    assert response.status_code == 422
+    assert "detail" in response.json()
+    assert "traceback" not in response.text.lower()
+
+
+@pytest.mark.parametrize(
+    "empty_data",
+    [[], "not_a_list", {"a": 1}, [1, 2, 3]],
+)
+def test_regression_adjusted_ate_empty_or_malformed_datasets(empty_data):
+    """Verify that empty or malformed dataset payloads return HTTP 422."""
+    payload = {
+        "data": empty_data,
+        "treatment_col": "treatment",
+        "outcome_col": "outcome",
+        "confounder_cols": ["age"],
+    }
+    response = client.post("/api/causal/regression-adjusted-ate", json=payload)
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "invalid_confounders",
+    [[], [""], ["   "], "not_a_list", [123]],
+)
+def test_regression_adjusted_ate_invalid_confounder_list(example_regression_causal_payload, invalid_confounders):
+    """Verify that empty or invalid confounder lists produce HTTP 422."""
+    payload = {**example_regression_causal_payload, "confounder_cols": invalid_confounders}
+    response = client.post("/api/causal/regression-adjusted-ate", json=payload)
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "missing_col,col_name",
+    [
+        ("treatment_col", "ghost_treatment"),
+        ("outcome_col", "ghost_outcome"),
+    ],
+)
+def test_regression_adjusted_ate_missing_columns(example_regression_causal_payload, missing_col, col_name):
+    """Verify descriptive HTTP 422 response when treatment or outcome columns are missing from data."""
+    payload = {**example_regression_causal_payload, missing_col: col_name}
+    response = client.post("/api/causal/regression-adjusted-ate", json=payload)
+    assert response.status_code == 422
+    assert col_name in str(response.json()["detail"])
+
+
+def test_regression_adjusted_ate_missing_confounder_column(example_regression_causal_payload):
+    """Verify descriptive HTTP 422 when a specified confounder column does not exist in data."""
+    payload = {**example_regression_causal_payload, "confounder_cols": ["non_existent_confounder"]}
+    response = client.post("/api/causal/regression-adjusted-ate", json=payload)
+    assert response.status_code == 422
+    assert "non_existent_confounder" in str(response.json()["detail"])
+
+
+@pytest.mark.parametrize(
+    "bad_config",
+    [
+        # treatment == outcome
+        {"treatment_col": "x", "outcome_col": "x", "confounder_cols": ["y"]},
+        # treatment in confounders
+        {"treatment_col": "t", "outcome_col": "y", "confounder_cols": ["t"]},
+        # outcome in confounders
+        {"treatment_col": "t", "outcome_col": "y", "confounder_cols": ["y"]},
+        # duplicate confounders
+        {"treatment_col": "t", "outcome_col": "y", "confounder_cols": ["x", "x"]},
+    ],
+)
+def test_regression_adjusted_ate_duplicate_or_conflicting_columns(bad_config):
+    """Verify rejection when column roles conflict or are duplicated."""
+    payload = {
+        "data": [{"t": 1, "y": 10, "x": 5}, {"t": 0, "y": 8, "x": 3}],
+        **bad_config,
+    }
+    response = client.post("/api/causal/regression-adjusted-ate", json=payload)
+    assert response.status_code == 422
+    assert "detail" in response.json()
+
+
+def test_regression_adjusted_ate_invalid_treatment_labels():
+    """Verify rejection when treatment column has non-binary labels."""
+    payload = {
+        "data": [
+            {"treatment": 0, "outcome": 10, "age": 20},
+            {"treatment": 1, "outcome": 15, "age": 25},
+            {"treatment": 2, "outcome": 20, "age": 30},
+        ],
+        "treatment_col": "treatment",
+        "outcome_col": "outcome",
+        "confounder_cols": ["age"],
+    }
+    response = client.post("/api/causal/regression-adjusted-ate", json=payload)
+    assert response.status_code == 422
+
+
+def test_regression_adjusted_ate_missing_values_rejected_by_default(example_regression_causal_payload):
+    """Verify that missing values in analysis columns are rejected with HTTP 422 when drop_missing=False."""
+    bad_data = [dict(row) for row in example_regression_causal_payload["data"]]
+    bad_data[0]["age"] = None
+    payload = {**example_regression_causal_payload, "data": bad_data, "drop_missing": False}
+    response = client.post("/api/causal/regression-adjusted-ate", json=payload)
+    assert response.status_code == 422
+    assert "missing" in str(response.json()["detail"]).lower()
+
+
+def test_regression_adjusted_ate_explicit_drop_missing(example_regression_causal_payload):
+    """Verify that drop_missing=True drops rows with missing values and returns accurate rows_dropped."""
+    dirty_data = [dict(row) for row in example_regression_causal_payload["data"]]
+    # Add two corrupted rows
+    dirty_data.append({"treatment": 1, "age": None, "outcome": 100})
+    dirty_data.append({"treatment": None, "age": 25, "outcome": 80})
+
+    payload = {**example_regression_causal_payload, "data": dirty_data, "drop_missing": True}
+    response = client.post("/api/causal/regression-adjusted-ate", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["rows_dropped"] == 2
+    assert data["n_total"] == 8
+    assert data["adjusted_ate"] == pytest.approx(5.0)
+
+
+def test_regression_adjusted_ate_constant_confounder_rejection():
+    """Verify that a confounder with zero variance is rejected with HTTP 422."""
+    data = [
+        {"treatment": 1, "age": 30, "outcome": 15},
+        {"treatment": 1, "age": 30, "outcome": 18},
+        {"treatment": 0, "age": 30, "outcome": 10},
+        {"treatment": 0, "age": 30, "outcome": 12},
+    ]
+    payload = {
+        "data": data,
+        "treatment_col": "treatment",
+        "outcome_col": "outcome",
+        "confounder_cols": ["age"],
+    }
+    response = client.post("/api/causal/regression-adjusted-ate", json=payload)
+    assert response.status_code == 422
+    assert "zero variance" in str(response.json()["detail"]).lower() or "constant" in str(response.json()["detail"]).lower()
+
+
+def test_regression_adjusted_ate_collinear_rejection(monkeypatch, example_regression_causal_payload):
+    """Verify that severe collinearity or non-estimable model failure is caught and returned as HTTP 422."""
+    def mock_estimator(*args, **kwargs):
+        raise ValueError(
+            "Regression model fitting resulted in NaN coefficients (likely due to severe collinearity or rank deficiency)."
+        )
+
+    monkeypatch.setattr("api.estimate_regression_adjusted_ate", mock_estimator)
+    response = client.post("/api/causal/regression-adjusted-ate", json=example_regression_causal_payload)
+    assert response.status_code == 422
+    assert "collinearity" in response.json()["detail"].lower()
+    assert "traceback" not in response.text.lower()
+
+
+def test_regression_adjusted_ate_insufficient_observations():
+    """Verify that datasets with fewer observations than model features are rejected."""
+    # 2 observations, but model has 3 features (intercept, treatment, age)
+    data = [
+        {"treatment": 1, "age": 20, "outcome": 15},
+        {"treatment": 0, "age": 25, "outcome": 10},
+    ]
+    payload = {
+        "data": data,
+        "treatment_col": "treatment",
+        "outcome_col": "outcome",
+        "confounder_cols": ["age"],
+    }
+    response = client.post("/api/causal/regression-adjusted-ate", json=payload)
+    assert response.status_code == 422
+    assert "insufficient observations" in str(response.json()["detail"]).lower()
+
+
+def test_causal_unadjusted_and_regression_adjusted_coexist(example_causal_payload, example_regression_causal_payload):
+    """Verify that both causal endpoints work seamlessly side by side."""
+    res_unadj = client.post("/api/causal/unadjusted-ate", json=example_causal_payload)
+    assert res_unadj.status_code == 200
+    assert res_unadj.json()["estimator"] == "unadjusted_difference_in_means"
+
+    res_reg = client.post("/api/causal/regression-adjusted-ate", json=example_regression_causal_payload)
+    assert res_reg.status_code == 200
+    assert res_reg.json()["estimator"] == "regression_adjusted_ate"
+
+
+

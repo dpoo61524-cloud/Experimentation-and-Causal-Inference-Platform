@@ -26,7 +26,10 @@ from statistics_engine import (
     sequential_conversion_test,
 )
 from bayesian_engine import bayesian_ab_test
-from causal_engine import estimate_unadjusted_ate_with_uncertainty
+from causal_engine import (
+    estimate_unadjusted_ate_with_uncertainty,
+    estimate_regression_adjusted_ate,
+)
 import numpy as np
 
 app = FastAPI(
@@ -1000,6 +1003,182 @@ async def unadjusted_ate_endpoint(
             untreated_value=payload.untreated_value,
             drop_missing=payload.drop_missing,
             confidence_level=payload.confidence_level,
+        )
+        return _sanitize_for_json(results)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=str(exc),
+        )
+
+
+
+class CausalRegressionAdjustedATERequest(BaseModel):
+    data: List[Dict[str, Any]] = Field(
+        ...,
+        description="Tabular dataset as a non-empty list of observation record dictionaries.",
+        examples=[
+            [
+                {"treatment": 1, "outcome": 12, "age": 21},
+                {"treatment": 1, "outcome": 14, "age": 22},
+                {"treatment": 1, "outcome": 16, "age": 23},
+                {"treatment": 0, "outcome": 6, "age": 21},
+                {"treatment": 0, "outcome": 10, "age": 24},
+                {"treatment": 0, "outcome": 8, "age": 22},
+            ]
+        ],
+    )
+    treatment_col: str = Field(
+        ...,
+        description="Name of the binary treatment indicator column in the dataset.",
+        examples=["treatment"],
+    )
+    outcome_col: str = Field(
+        ...,
+        description="Name of the numeric outcome column in the dataset.",
+        examples=["outcome"],
+    )
+    confounder_cols: List[str] = Field(
+        ...,
+        description="Non-empty list of confounder/covariate column names to adjust for.",
+        examples=[["age"]],
+    )
+    treated_value: Optional[Any] = Field(
+        None,
+        description="Optional label identifying treated observations. Inferred automatically if omitted.",
+        examples=[1],
+    )
+    untreated_value: Optional[Any] = Field(
+        None,
+        description="Optional label identifying control/untreated observations. Inferred automatically if omitted.",
+        examples=[0],
+    )
+    drop_missing: bool = Field(
+        default=False,
+        description="Whether to explicitly drop rows with missing values across analysis columns. Default is false.",
+        examples=[False],
+    )
+
+    @field_validator("data")
+    @classmethod
+    def validate_data_list(cls, v: Any) -> List[Dict[str, Any]]:
+        if not isinstance(v, list):
+            raise ValueError("data must be a list of observation dictionaries.")
+        if len(v) == 0:
+            raise ValueError("data cannot be empty. Causal inference requires observations.")
+        for idx, row in enumerate(v):
+            if not isinstance(row, dict):
+                raise ValueError(f"Observation at index {idx} must be a dictionary, got {type(row).__name__}.")
+        return v
+
+    @field_validator("treatment_col", "outcome_col")
+    @classmethod
+    def validate_non_empty_column_name(cls, v: Any, info: Any) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError(f"{info.field_name} must be a non-empty string.")
+        return v.strip()
+
+    @field_validator("confounder_cols")
+    @classmethod
+    def validate_confounders(cls, v: Any) -> List[str]:
+        if not isinstance(v, list):
+            raise ValueError("confounder_cols must be a list of column names.")
+        if len(v) == 0:
+            raise ValueError("confounder_cols must contain at least one column name.")
+        clean_cols = []
+        for idx, col in enumerate(v):
+            if not isinstance(col, str) or not col.strip():
+                raise ValueError(f"Confounder column at index {idx} must be a non-empty string.")
+            clean_cols.append(col.strip())
+        return clean_cols
+
+    @field_validator("drop_missing")
+    @classmethod
+    def validate_drop_missing(cls, v: Any) -> bool:
+        if not isinstance(v, bool):
+            raise ValueError("drop_missing must be a boolean.")
+        return v
+
+    @model_validator(mode="after")
+    def validate_distinct_roles(self) -> "CausalRegressionAdjustedATERequest":
+        if self.treatment_col == self.outcome_col:
+            raise ValueError(
+                f"treatment_col and outcome_col cannot be the same column ('{self.treatment_col}')."
+            )
+        for col in self.confounder_cols:
+            if col == self.treatment_col:
+                raise ValueError(
+                    f"Confounder column '{col}' cannot also be the treatment column."
+                )
+            if col == self.outcome_col:
+                raise ValueError(
+                    f"Confounder column '{col}' cannot also be the outcome column."
+                )
+        if len(self.confounder_cols) != len(set(self.confounder_cols)):
+            raise ValueError(
+                f"confounder_cols contains duplicate column names: {self.confounder_cols}."
+            )
+        return self
+
+
+class CausalRegressionAdjustedATEResponse(BaseModel):
+    estimator: str = Field(..., description="Name of the estimator used (regression_adjusted_ate)")
+    adjusted_ate: float = Field(..., description="Estimated regression-adjusted ATE (treated minus control)")
+    ate: float = Field(..., description="Alias for adjusted_ate")
+    unadjusted_ate: float = Field(..., description="Unadjusted difference in sample means (treated minus control)")
+    raw_difference: float = Field(..., description="Alias for unadjusted_ate")
+    difference_in_means: float = Field(..., description="Alias for unadjusted_ate")
+    mean_outcome_treated: float = Field(..., description="Sample mean outcome of the treated group")
+    mean_outcome_control: float = Field(..., description="Sample mean outcome of the control/untreated group")
+    outcome_mean_treated: float = Field(..., description="Alias for mean_outcome_treated")
+    outcome_mean_untreated: float = Field(..., description="Alias for mean_outcome_control")
+    mean_predicted_treated: float = Field(..., description="Average counterfactual predicted outcome under treatment")
+    mean_predicted_control: float = Field(..., description="Average counterfactual predicted outcome under control")
+    n_total: int = Field(..., description="Total number of observations used in model fitting")
+    n_treated: int = Field(..., description="Number of treated observations")
+    n_control: int = Field(..., description="Number of control/untreated observations")
+    n_untreated: int = Field(..., description="Alias for n_control")
+    treatment_col: str = Field(..., description="Name of the treatment column")
+    outcome_col: str = Field(..., description="Name of the outcome column")
+    confounder_cols: List[str] = Field(..., description="List of confounder column names")
+    numeric_confounders: List[str] = Field(..., description="List of continuous numeric confounder columns")
+    categorical_confounders: List[str] = Field(..., description="List of categorical confounder columns")
+    model_features: List[str] = Field(..., description="Feature column names included in the design matrix")
+    treated_value: Any = Field(..., description="Resolved value representing the treated condition")
+    control_value: Any = Field(..., description="Resolved value representing the control condition")
+    untreated_value: Any = Field(..., description="Alias for control_value")
+    rows_dropped: int = Field(0, description="Number of rows dropped due to missing data")
+    r_squared: Optional[float] = Field(None, description="Coefficient of determination (R^2) of the outcome model")
+    regression_coefficients: Optional[Dict[str, float]] = Field(None, description="Regression coefficients if available")
+    f_statistic: Optional[float] = Field(None, description="Model F-statistic if available")
+    interpretation: str = Field(..., description="Concise interpretation of adjusted vs raw estimates")
+    assumptions: str = Field(..., description="Educational explanation of identifying assumptions and confounding limitations")
+
+
+@app.post(
+    "/api/causal/regression-adjusted-ate",
+    response_model=CausalRegressionAdjustedATEResponse,
+    tags=["Causal Inference"],
+    summary="Estimate regression-adjusted Average Treatment Effect (ATE)",
+)
+async def regression_adjusted_ate_endpoint(
+    payload: CausalRegressionAdjustedATERequest,
+) -> Dict[str, Any]:
+    """Estimate the regression-adjusted Average Treatment Effect (ATE) using G-computation.
+
+    Fits an OLS regression model of the outcome on treatment and confounders, generates
+    counterfactual predictions under treatment and control for each unit, and computes the
+    sample average contrast.
+    """
+    try:
+        results = estimate_regression_adjusted_ate(
+            data=payload.data,
+            treatment_col=payload.treatment_col,
+            outcome_col=payload.outcome_col,
+            confounder_cols=payload.confounder_cols,
+            treated_value=payload.treated_value,
+            untreated_value=payload.untreated_value,
+            drop_missing=payload.drop_missing,
         )
         return _sanitize_for_json(results)
     except ValueError as exc:

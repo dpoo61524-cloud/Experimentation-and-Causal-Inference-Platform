@@ -646,6 +646,90 @@ curl -X POST http://127.0.0.1:8000/api/causal/unadjusted-ate \
 
 ---
 
+### Regression-Adjusted Average Treatment Effect (ATE)
+- **URL**: `POST /api/causal/regression-adjusted-ate`
+- **Method**: `POST`
+- **Description**: Estimates the Average Treatment Effect (ATE) adjusting for observed baseline confounders using regression adjustment (parametric G-computation). An ordinary least squares (OLS) model is fitted, potential outcomes $\hat{Y}_i(1)$ and $\hat{Y}_i(0)$ are imputed for all units, and the average individual contrast is calculated.
+- **Request Parameters**:
+  - `data` (list of dicts, required): Non-empty list of observation records containing treatment, outcome, and confounders.
+  - `treatment_col` (string, required): Name of the binary treatment indicator column.
+  - `outcome_col` (string, required): Name of the numeric outcome column.
+  - `confounder_cols` (list of strings, required): Non-empty list of continuous or categorical confounder column names to adjust for.
+  - `treated_value` (any, optional): Label identifying treated units (inferred automatically if omitted).
+  - `untreated_value` (any, optional): Label identifying control units (inferred automatically if omitted).
+  - `drop_missing` (boolean, optional, default `false`): Whether to drop rows containing missing values in analysis columns.
+- **Methodological & Causal Considerations**:
+  - **Adjustment for Observed Confounders**: The endpoint models the conditional expectation $E[Y \mid T, X]$ and controls for the supplied observed confounders.
+  - **No Unmeasured Confounding**: Regression adjustment does **not** automatically eliminate unmeasured confounding. If relevant confounders are omitted or unobserved, residual confounding bias remains.
+  - **Causal Assumptions**: Causal interpretation strictly depends on key identification assumptions:
+    1. *Conditional Exchangeability* ($(Y(1), Y(0)) \perp\!\!\perp T \mid X$): Potential outcomes are independent of treatment conditional on observed covariates.
+    2. *Positivity / Common Support* ($0 < P(T = 1 \mid X = x) < 1$): Every covariate subpopulation has a non-zero probability of receiving either treatment.
+    3. *Model Specification*: The parametric outcome regression correctly approximates the conditional expectation function.
+    4. *SUTVA*: No interference between units and no hidden variations of treatment.
+
+**Example Request**:
+```bash
+curl -X POST http://127.0.0.1:8000/api/causal/regression-adjusted-ate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "data": [
+      {"treatment": 1, "outcome": 67.0, "age": 20},
+      {"treatment": 1, "outcome": 82.0, "age": 25},
+      {"treatment": 1, "outcome": 97.0, "age": 30},
+      {"treatment": 1, "outcome": 112.0, "age": 35},
+      {"treatment": 0, "outcome": 68.0, "age": 22},
+      {"treatment": 0, "outcome": 80.0, "age": 26},
+      {"treatment": 0, "outcome": 98.0, "age": 32},
+      {"treatment": 0, "outcome": 116.0, "age": 38}
+    ],
+    "treatment_col": "treatment",
+    "outcome_col": "outcome",
+    "confounder_cols": ["age"],
+    "treated_value": 1,
+    "untreated_value": 0,
+    "drop_missing": false
+  }'
+```
+
+**Example Response (200 OK)**:
+```json
+{
+  "estimator": "regression_adjusted_ate",
+  "adjusted_ate": 5.0,
+  "ate": 5.0,
+  "unadjusted_ate": -1.0,
+  "raw_difference": -1.0,
+  "difference_in_means": -1.0,
+  "mean_outcome_treated": 89.5,
+  "mean_outcome_control": 90.5,
+  "outcome_mean_treated": 89.5,
+  "outcome_mean_untreated": 90.5,
+  "mean_predicted_treated": 92.5,
+  "mean_predicted_control": 87.5,
+  "n_total": 8,
+  "n_treated": 4,
+  "n_control": 4,
+  "n_untreated": 4,
+  "treatment_col": "treatment",
+  "outcome_col": "outcome",
+  "confounder_cols": ["age"],
+  "numeric_confounders": ["age"],
+  "categorical_confounders": [],
+  "model_features": ["const", "treatment_indicator", "age"],
+  "treated_value": 1,
+  "control_value": 0,
+  "untreated_value": 0,
+  "rows_dropped": 0,
+  "r_squared": 1.0,
+  "regression_coefficients": null,
+  "f_statistic": null,
+  "interpretation": "The regression-adjusted ATE is 5.0000 (unadjusted difference in means: -1.0000). This reflects the average counterfactual contrast: the expected difference in outcome if the entire sample were assigned to the treated condition versus the control condition, adjusting for observed confounders (age)...",
+  "assumptions": "Regression adjustment (G-computation) identifies the Average Treatment Effect (ATE) under four primary identification assumptions: (1) Conditional Exchangeability / No Unmeasured Confounding ((Y(1), Y(0)) ⫫ T | X); (2) Positivity / Overlap (0 < P(T=1 | X=x) < 1); (3) Correct Model Specification; and (4) SUTVA..."
+}
+```
+
+---
+
 ## Academic Viva & Exam Notes
 
 ### 1. What is the "peeking problem" in online A/B testing?
