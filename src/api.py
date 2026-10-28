@@ -31,6 +31,7 @@ from causal_engine import (
     estimate_regression_adjusted_ate,
     estimate_propensity_scores,
     estimate_iptw_ate,
+    estimate_difference_in_differences,
 )
 import numpy as np
 
@@ -1638,8 +1639,238 @@ async def iptw_ate_endpoint(
         )
 
 
+
+class CausalDifferenceInDifferencesRequest(BaseModel):
+    data: List[Dict[str, Any]] = Field(
+        ...,
+        description="Tabular dataset as a non-empty list of observation record dictionaries.",
+        examples=[
+            [
+                {"treatment": 1, "time": 0, "outcome": 10.0},
+                {"treatment": 1, "time": 0, "outcome": 12.0},
+                {"treatment": 1, "time": 1, "outcome": 18.0},
+                {"treatment": 1, "time": 1, "outcome": 22.0},
+                {"treatment": 0, "time": 0, "outcome": 5.0},
+                {"treatment": 0, "time": 0, "outcome": 7.0},
+                {"treatment": 0, "time": 1, "outcome": 8.0},
+                {"treatment": 0, "time": 1, "outcome": 10.0},
+            ]
+        ],
+    )
+    treatment_col: str = Field(
+        ...,
+        description="Name of the treatment group indicator column distinguishing treated from control units.",
+        examples=["treatment"],
+    )
+    time_col: Optional[str] = Field(
+        None,
+        description="Name of the time-period indicator column distinguishing pre-intervention from post-intervention.",
+        examples=["time"],
+    )
+    time_period_col: Optional[str] = Field(
+        None,
+        description="Alias for time_col.",
+        examples=["time"],
+    )
+    outcome_col: str = Field(
+        ...,
+        description="Name of the numeric outcome column.",
+        examples=["outcome"],
+    )
+    treated_value: Optional[Any] = Field(
+        None,
+        description="Label identifying the treated group. Inferred automatically if omitted.",
+        examples=[1],
+    )
+    control_value: Optional[Any] = Field(
+        None,
+        description="Label identifying the control group. Inferred automatically if omitted.",
+        examples=[0],
+    )
+    untreated_value: Optional[Any] = Field(
+        None,
+        description="Alias for control_value.",
+        examples=[0],
+    )
+    pre_value: Optional[Any] = Field(
+        None,
+        description="Label identifying the pre-intervention period. Inferred automatically if omitted.",
+        examples=[0],
+    )
+    post_value: Optional[Any] = Field(
+        None,
+        description="Label identifying the post-intervention period. Inferred automatically if omitted.",
+        examples=[1],
+    )
+    pre_period_value: Optional[Any] = Field(
+        None,
+        description="Alias for pre_value.",
+        examples=[0],
+    )
+    post_period_value: Optional[Any] = Field(
+        None,
+        description="Alias for post_value.",
+        examples=[1],
+    )
+    drop_missing: bool = Field(
+        default=False,
+        description="Whether to drop rows with missing values in treatment, time, or outcome columns. Default is false.",
+        examples=[False],
+    )
+
+    @field_validator("data")
+    @classmethod
+    def validate_data_list(cls, v: Any) -> List[Dict[str, Any]]:
+        if not isinstance(v, list):
+            raise ValueError("data must be a list of observation dictionaries.")
+        if len(v) == 0:
+            raise ValueError("data cannot be empty. Causal inference requires observations.")
+        for idx, row in enumerate(v):
+            if not isinstance(row, dict):
+                raise ValueError(f"Observation at index {idx} must be a dictionary, got {type(row).__name__}.")
+        return v
+
+    @field_validator("treatment_col", "outcome_col")
+    @classmethod
+    def validate_required_column_names(cls, v: Any, info: Any) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError(f"{info.field_name} must be a non-empty string.")
+        return v.strip()
+
+    @field_validator("time_col", "time_period_col")
+    @classmethod
+    def validate_optional_time_column_name(cls, v: Any, info: Any) -> Optional[str]:
+        if v is None:
+            return None
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError(f"{info.field_name} must be a non-empty string when provided.")
+        return v.strip()
+
+    @field_validator("drop_missing")
+    @classmethod
+    def validate_drop_missing(cls, v: Any) -> bool:
+        if not isinstance(v, bool):
+            raise ValueError("drop_missing must be a boolean.")
+        return v
+
+    @model_validator(mode="after")
+    def validate_model_consistency(self) -> "CausalDifferenceInDifferencesRequest":
+        # Resolve time column alias
+        actual_time_col = self.time_col or self.time_period_col
+        if actual_time_col is None:
+            raise ValueError("time_col (or time_period_col) must be provided as a non-empty string.")
+        self.time_col = actual_time_col
+
+        # Role conflicts
+        if self.treatment_col == self.outcome_col:
+            raise ValueError(
+                f"treatment_col and outcome_col cannot be the same column ('{self.treatment_col}')."
+            )
+        if self.time_col == self.outcome_col:
+            raise ValueError(
+                f"time_col and outcome_col cannot be the same column ('{self.time_col}')."
+            )
+        if self.treatment_col == self.time_col:
+            raise ValueError(
+                f"treatment_col and time_col cannot be the same column ('{self.treatment_col}')."
+            )
+
+        # Label equality checks
+        actual_control = self.control_value if self.control_value is not None else self.untreated_value
+        if self.treated_value is not None and actual_control is not None and self.treated_value == actual_control:
+            raise ValueError("treated_value and control_value cannot be identical.")
+
+        actual_pre = self.pre_value if self.pre_value is not None else self.pre_period_value
+        actual_post = self.post_value if self.post_value is not None else self.post_period_value
+        if actual_pre is not None and actual_post is not None and actual_pre == actual_post:
+            raise ValueError("pre_value and post_value cannot be identical.")
+
+        return self
+
+
+class CausalDifferenceInDifferencesResponse(BaseModel):
+    estimator: str = Field(..., description="Name of the estimator used (difference_in_differences)")
+    did_estimate: float = Field(..., description="Difference-in-Differences treatment effect estimate: (T_post - T_pre) - (C_post - C_pre)")
+    did: float = Field(..., description="Alias for did_estimate")
+    ate: float = Field(..., description="Alias for did_estimate")
+    treatment_mean_pre: float = Field(..., description="Mean outcome for treated units before intervention")
+    treatment_mean_post: float = Field(..., description="Mean outcome for treated units after intervention")
+    control_mean_pre: float = Field(..., description="Mean outcome for control units before intervention")
+    control_mean_post: float = Field(..., description="Mean outcome for control units after intervention")
+    treated_mean_pre: float = Field(..., description="Alias for treatment_mean_pre")
+    treated_mean_post: float = Field(..., description="Alias for treatment_mean_post")
+    treatment_change: float = Field(..., description="Mean outcome change for treated units (post minus pre)")
+    control_change: float = Field(..., description="Mean outcome change for control units (post minus pre)")
+    delta_treatment: float = Field(..., description="Alias for treatment_change")
+    delta_control: float = Field(..., description="Alias for control_change")
+    delta_treated: float = Field(..., description="Alias for treatment_change")
+    cell_counts: Dict[str, int] = Field(..., description="Observation counts across the four group-period cells")
+    n_treatment_pre: int = Field(..., description="Count of treated observations in pre-period")
+    n_treatment_post: int = Field(..., description="Count of treated observations in post-period")
+    n_control_pre: int = Field(..., description="Count of control observations in pre-period")
+    n_control_post: int = Field(..., description="Count of control observations in post-period")
+    n_treated_pre: int = Field(..., description="Alias for n_treatment_pre")
+    n_treated_post: int = Field(..., description="Alias for n_treatment_post")
+    n_treated: int = Field(..., description="Total treated observations across both periods")
+    n_control: int = Field(..., description="Total control observations across both periods")
+    n_untreated: int = Field(..., description="Alias for n_control")
+    n_total: int = Field(..., description="Total number of observations used in estimation")
+    rows_dropped: int = Field(0, description="Number of rows dropped due to missing data")
+    treatment_col: str = Field(..., description="Name of the treatment column")
+    time_col: str = Field(..., description="Name of the time-period column")
+    time_period_col: str = Field(..., description="Alias for time_col")
+    outcome_col: str = Field(..., description="Name of the outcome column")
+    treated_value: Any = Field(..., description="Resolved label representing the treated condition")
+    control_value: Any = Field(..., description="Resolved label representing the control condition")
+    untreated_value: Any = Field(..., description="Alias for control_value")
+    pre_value: Any = Field(..., description="Resolved label representing the pre-intervention period")
+    post_value: Any = Field(..., description="Resolved label representing the post-intervention period")
+    interpretation: str = Field(..., description="Interpretation summarizing group changes and DiD effect")
+    assumptions: str = Field(..., description="Educational explanation of identifying assumptions (parallel trends, no anticipation, SUTVA)")
+
+
+@app.post(
+    "/api/causal/difference-in-differences",
+    response_model=CausalDifferenceInDifferencesResponse,
+    tags=["Causal Inference"],
+    summary="Estimate treatment effect using Difference-in-Differences (DiD)",
+)
+async def difference_in_differences_endpoint(
+    payload: CausalDifferenceInDifferencesRequest,
+) -> Dict[str, Any]:
+    """Estimate treatment effect using the canonical two-group, two-period Difference-in-Differences estimator.
+
+    Computes the change over time in the treatment group minus the change over time in the control group:
+    DiD = (Ybar_{T,post} - Ybar_{T,pre}) - (Ybar_{C,post} - Ybar_{C,pre}).
+    """
+    try:
+        resolved_time_col = payload.time_col or payload.time_period_col
+        resolved_control = payload.control_value if payload.control_value is not None else payload.untreated_value
+        resolved_pre = payload.pre_value if payload.pre_value is not None else payload.pre_period_value
+        resolved_post = payload.post_value if payload.post_value is not None else payload.post_period_value
+
+        results = estimate_difference_in_differences(
+            data=payload.data,
+            treatment_col=payload.treatment_col,
+            time_col=resolved_time_col,
+            outcome_col=payload.outcome_col,
+            treated_value=payload.treated_value,
+            control_value=resolved_control,
+            pre_value=resolved_pre,
+            post_value=resolved_post,
+            drop_missing=payload.drop_missing,
+        )
+        return _sanitize_for_json(results)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=str(exc),
+        )
+
+
 if __name__ == "__main__":
     uvicorn.run("api:app", host="127.0.0.1", port=8000, reload=True)
+
 
 
 

@@ -2219,6 +2219,409 @@ def test_causal_all_four_endpoints_coexist(
     assert res4.json()["estimator"] == "iptw_ate"
 
 
+# --- Causal Inference: Difference-in-Differences (DiD) Endpoint Tests ---
+
+@pytest.fixture
+def example_did_payload():
+    """Deterministic payload:
+    Treated: pre mean = 10.0, post mean = 16.0 (change = +6.0)
+    Control: pre mean = 8.0, post mean = 11.0 (change = +3.0)
+    Expected DiD = 6.0 - 3.0 = 3.0
+    """
+    data = [
+        {"treatment": 1, "time": 0, "outcome": 9.0},
+        {"treatment": 1, "time": 0, "outcome": 11.0},
+        {"treatment": 1, "time": 1, "outcome": 15.0},
+        {"treatment": 1, "time": 1, "outcome": 17.0},
+        {"treatment": 0, "time": 0, "outcome": 7.0},
+        {"treatment": 0, "time": 0, "outcome": 9.0},
+        {"treatment": 0, "time": 1, "outcome": 10.0},
+        {"treatment": 0, "time": 1, "outcome": 12.0},
+    ]
+    return {
+        "data": data,
+        "treatment_col": "treatment",
+        "time_col": "time",
+        "outcome_col": "outcome",
+        "treated_value": 1,
+        "control_value": 0,
+        "pre_value": 0,
+        "post_value": 1,
+        "drop_missing": False,
+    }
+
+
+def test_did_endpoint_success(example_did_payload):
+    """Verify HTTP 200, valid schema, exact DiD estimate, group means, cell counts, and interpretation."""
+    response = client.post("/api/causal/difference-in-differences", json=example_did_payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    # Estimator metadata & sample counts
+    assert data["estimator"] == "difference_in_differences"
+    assert data["n_total"] == 8
+    assert data["n_treated"] == 4
+    assert data["n_control"] == 4
+    assert data["n_untreated"] == 4
+    assert data["treatment_col"] == "treatment"
+    assert data["time_col"] == "time"
+    assert data["outcome_col"] == "outcome"
+    assert data["treated_value"] == 1
+    assert data["control_value"] == 0
+    assert data["pre_value"] == 0
+    assert data["post_value"] == 1
+    assert data["rows_dropped"] == 0
+
+    # Cell means
+    assert data["treatment_mean_pre"] == pytest.approx(10.0)
+    assert data["treated_mean_pre"] == pytest.approx(10.0)
+    assert data["treatment_mean_post"] == pytest.approx(16.0)
+    assert data["treated_mean_post"] == pytest.approx(16.0)
+    assert data["control_mean_pre"] == pytest.approx(8.0)
+    assert data["control_mean_post"] == pytest.approx(11.0)
+
+    # Time changes & DiD
+    assert data["treatment_change"] == pytest.approx(6.0)
+    assert data["delta_treatment"] == pytest.approx(6.0)
+    assert data["delta_treated"] == pytest.approx(6.0)
+    assert data["control_change"] == pytest.approx(3.0)
+    assert data["delta_control"] == pytest.approx(3.0)
+    assert data["did_estimate"] == pytest.approx(3.0)
+    assert data["did"] == pytest.approx(3.0)
+    assert data["ate"] == pytest.approx(3.0)
+
+    # Cell observation counts
+    assert data["cell_counts"] == {
+        "treatment_pre": 2,
+        "treatment_post": 2,
+        "control_pre": 2,
+        "control_post": 2,
+    }
+    assert data["n_treatment_pre"] == 2
+    assert data["n_treatment_post"] == 2
+    assert data["n_control_pre"] == 2
+    assert data["n_control_post"] == 2
+
+    # Narrative text
+    assert "assumptions" in data
+    assert "interpretation" in data
+    assert "traceback" not in response.text.lower()
+
+
+def test_did_endpoint_time_period_col_alias():
+    """Verify that time_period_col is accepted as an alias for time_col."""
+    payload = {
+        "data": [
+            {"arm": 1, "period": 0, "y": 10.0},
+            {"arm": 1, "period": 1, "y": 18.0},
+            {"arm": 0, "period": 0, "y": 5.0},
+            {"arm": 0, "period": 1, "y": 8.0},
+        ],
+        "treatment_col": "arm",
+        "time_period_col": "period",
+        "outcome_col": "y",
+    }
+    response = client.post("/api/causal/difference-in-differences", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["did_estimate"] == pytest.approx(5.0)
+    assert data["time_col"] == "period"
+    assert data["time_period_col"] == "period"
+
+
+def test_did_endpoint_custom_labels():
+    """Verify that custom string treatment labels and time period labels work seamlessly."""
+    payload = {
+        "data": [
+            {"group": "pilot", "wave": "before", "score": 40.0},
+            {"group": "pilot", "wave": "after", "score": 65.0},
+            {"group": "benchmark", "wave": "before", "score": 30.0},
+            {"group": "benchmark", "wave": "after", "score": 40.0},
+        ],
+        "treatment_col": "group",
+        "time_col": "wave",
+        "outcome_col": "score",
+        "treated_value": "pilot",
+        "control_value": "benchmark",
+        "pre_value": "before",
+        "post_value": "after",
+    }
+    response = client.post("/api/causal/difference-in-differences", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["treated_value"] == "pilot"
+    assert data["control_value"] == "benchmark"
+    assert data["pre_value"] == "before"
+    assert data["post_value"] == "after"
+    assert data["treatment_change"] == pytest.approx(25.0)
+    assert data["control_change"] == pytest.approx(10.0)
+    assert data["did_estimate"] == pytest.approx(15.0)
+
+
+def test_did_endpoint_zero_and_negative_estimates():
+    """Verify true zero and negative treatment effects."""
+    payload_zero = {
+        "data": [
+            {"t": 1, "p": 0, "y": 10.0},
+            {"t": 1, "p": 1, "y": 14.0},
+            {"t": 0, "p": 0, "y": 20.0},
+            {"t": 0, "p": 1, "y": 24.0},
+        ],
+        "treatment_col": "t",
+        "time_col": "p",
+        "outcome_col": "y",
+    }
+    res_zero = client.post("/api/causal/difference-in-differences", json=payload_zero)
+    assert res_zero.status_code == 200
+    assert res_zero.json()["did_estimate"] == pytest.approx(0.0)
+
+    payload_neg = {
+        "data": [
+            {"t": 1, "p": 0, "y": 20.0},
+            {"t": 1, "p": 1, "y": 22.0},
+            {"t": 0, "p": 0, "y": 20.0},
+            {"t": 0, "p": 1, "y": 28.0},
+        ],
+        "treatment_col": "t",
+        "time_col": "p",
+        "outcome_col": "y",
+    }
+    res_neg = client.post("/api/causal/difference-in-differences", json=payload_neg)
+    assert res_neg.status_code == 200
+    assert res_neg.json()["did_estimate"] == pytest.approx(-6.0)
+
+
+def test_did_endpoint_negative_outcomes():
+    """Verify that negative outcome values are handled correctly without numerical distortion."""
+    payload = {
+        "data": [
+            {"t": 1, "time": 0, "y": -10.0},
+            {"t": 1, "time": 1, "y": -2.0},
+            {"t": 0, "time": 0, "y": -15.0},
+            {"t": 0, "time": 1, "y": -12.0},
+        ],
+        "treatment_col": "t",
+        "time_col": "time",
+        "outcome_col": "y",
+    }
+    response = client.post("/api/causal/difference-in-differences", json=payload)
+    assert response.status_code == 200
+    assert response.json()["did_estimate"] == pytest.approx(5.0)
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ["data", "treatment_col", "outcome_col"],
+)
+def test_did_endpoint_missing_required_fields(example_did_payload, missing_field):
+    """Verify that omitting required request fields returns HTTP 422."""
+    payload = {k: v for k, v in example_did_payload.items() if k != missing_field}
+    response = client.post("/api/causal/difference-in-differences", json=payload)
+    assert response.status_code == 422
+    assert "detail" in response.json()
+    assert "traceback" not in response.text.lower()
+
+
+def test_did_endpoint_missing_time_col(example_did_payload):
+    """Verify that omitting both time_col and time_period_col returns HTTP 422."""
+    payload = {k: v for k, v in example_did_payload.items() if k not in ["time_col", "time_period_col"]}
+    response = client.post("/api/causal/difference-in-differences", json=payload)
+    assert response.status_code == 422
+    assert "time_col" in str(response.json()["detail"]).lower()
+
+
+@pytest.mark.parametrize(
+    "col1,col2",
+    [
+        ("treatment_col", "outcome_col"),
+        ("time_col", "outcome_col"),
+        ("treatment_col", "time_col"),
+    ],
+)
+def test_did_endpoint_conflicting_column_roles(example_did_payload, col1, col2):
+    """Verify that assigning the same column to multiple roles returns HTTP 422."""
+    payload = {**example_did_payload, col2: example_did_payload[col1]}
+    response = client.post("/api/causal/difference-in-differences", json=payload)
+    assert response.status_code == 422
+    assert "cannot be the same column" in str(response.json()["detail"]).lower()
+
+
+def test_did_endpoint_missing_columns_in_data(example_did_payload):
+    """Verify rejection with HTTP 422 when specified columns are absent from data records."""
+    res1 = client.post(
+        "/api/causal/difference-in-differences",
+        json={**example_did_payload, "treatment_col": "non_existent"},
+    )
+    assert res1.status_code == 422
+
+    res2 = client.post(
+        "/api/causal/difference-in-differences",
+        json={**example_did_payload, "time_col": "non_existent"},
+    )
+    assert res2.status_code == 422
+
+    res3 = client.post(
+        "/api/causal/difference-in-differences",
+        json={**example_did_payload, "outcome_col": "non_existent"},
+    )
+    assert res3.status_code == 422
+
+
+def test_did_endpoint_single_treatment_class():
+    """Verify rejection with HTTP 422 when only treated or only control units are present."""
+    data = [
+        {"t": 1, "time": 0, "y": 10.0},
+        {"t": 1, "time": 1, "y": 15.0},
+    ]
+    payload = {"data": data, "treatment_col": "t", "time_col": "time", "outcome_col": "y"}
+    response = client.post("/api/causal/difference-in-differences", json=payload)
+    assert response.status_code == 422
+    assert "requires both treated and control" in str(response.json()["detail"]).lower()
+
+
+def test_did_endpoint_single_time_period():
+    """Verify rejection with HTTP 422 when only pre-period or only post-period units are present."""
+    data = [
+        {"t": 1, "time": 0, "y": 10.0},
+        {"t": 0, "time": 0, "y": 8.0},
+    ]
+    payload = {"data": data, "treatment_col": "t", "time_col": "time", "outcome_col": "y"}
+    response = client.post("/api/causal/difference-in-differences", json=payload)
+    assert response.status_code == 422
+    assert "requires both pre- and post" in str(response.json()["detail"]).lower()
+
+
+def test_did_endpoint_empty_cell_rejected():
+    """Verify rejection with HTTP 422 when any of the 4 group-period cells has 0 observations."""
+    data = [
+        {"t": 1, "time": 0, "y": 10.0},
+        {"t": 1, "time": 1, "y": 15.0},
+        {"t": 0, "time": 0, "y": 8.0},
+    ]
+    payload = {"data": data, "treatment_col": "t", "time_col": "time", "outcome_col": "y"}
+    response = client.post("/api/causal/difference-in-differences", json=payload)
+    assert response.status_code == 422
+    assert "four group-period cells" in str(response.json()["detail"]).lower()
+
+
+def test_did_endpoint_missing_values_rejected_by_default(example_did_payload):
+    """Verify rejection with HTTP 422 when missing values exist and drop_missing=False."""
+    bad_data = [dict(row) for row in example_did_payload["data"]]
+    bad_data[0]["outcome"] = None
+    payload = {**example_did_payload, "data": bad_data, "drop_missing": False}
+    response = client.post("/api/causal/difference-in-differences", json=payload)
+    assert response.status_code == 422
+    assert "missing" in str(response.json()["detail"]).lower()
+
+
+def test_did_endpoint_explicit_drop_missing(example_did_payload):
+    """Verify that drop_missing=True drops rows with missing values and returns updated counts."""
+    dirty_data = [dict(row) for row in example_did_payload["data"]]
+    dirty_data.append({"treatment": 1, "time": 0, "outcome": None})
+    dirty_data.append({"treatment": None, "time": 1, "outcome": 20.0})
+    dirty_data.append({"treatment": 0, "time": None, "outcome": 8.0})
+
+    payload = {**example_did_payload, "data": dirty_data, "drop_missing": True}
+    response = client.post("/api/causal/difference-in-differences", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["rows_dropped"] == 3
+    assert data["n_total"] == 8
+    assert data["did_estimate"] == pytest.approx(3.0)
+
+
+def test_did_endpoint_nonnumeric_outcome():
+    """Verify rejection with HTTP 422 when outcome values are non-numeric strings or booleans."""
+    data_str = [
+        {"t": 1, "time": 0, "y": "ten"},
+        {"t": 1, "time": 1, "y": 15.0},
+        {"t": 0, "time": 0, "y": 8.0},
+        {"t": 0, "time": 1, "y": 10.0},
+    ]
+    res_str = client.post(
+        "/api/causal/difference-in-differences",
+        json={"data": data_str, "treatment_col": "t", "time_col": "time", "outcome_col": "y"},
+    )
+    assert res_str.status_code == 422
+
+    data_bool = [
+        {"t": 1, "time": 0, "y": True},
+        {"t": 1, "time": 1, "y": False},
+        {"t": 0, "time": 0, "y": True},
+        {"t": 0, "time": 1, "y": False},
+    ]
+    res_bool = client.post(
+        "/api/causal/difference-in-differences",
+        json={"data": data_bool, "treatment_col": "t", "time_col": "time", "outcome_col": "y"},
+    )
+    assert res_bool.status_code == 422
+
+
+def test_did_endpoint_identical_labels():
+    """Verify rejection when treated_value == control_value or pre_value == post_value."""
+    payload1 = {
+        "data": [
+            {"t": 1, "time": 0, "y": 10.0},
+            {"t": 1, "time": 1, "y": 15.0},
+            {"t": 0, "time": 0, "y": 8.0},
+            {"t": 0, "time": 1, "y": 10.0},
+        ],
+        "treatment_col": "t",
+        "time_col": "time",
+        "outcome_col": "y",
+        "treated_value": 1,
+        "control_value": 1,
+    }
+    res1 = client.post("/api/causal/difference-in-differences", json=payload1)
+    assert res1.status_code == 422
+
+    payload2 = {
+        "data": [
+            {"t": 1, "time": 0, "y": 10.0},
+            {"t": 1, "time": 1, "y": 15.0},
+            {"t": 0, "time": 0, "y": 8.0},
+            {"t": 0, "time": 1, "y": 10.0},
+        ],
+        "treatment_col": "t",
+        "time_col": "time",
+        "outcome_col": "y",
+        "pre_value": 0,
+        "post_value": 0,
+    }
+    res2 = client.post("/api/causal/difference-in-differences", json=payload2)
+    assert res2.status_code == 422
+
+
+def test_causal_all_five_endpoints_coexist(
+    example_causal_payload,
+    example_regression_causal_payload,
+    example_propensity_payload,
+    example_iptw_payload,
+    example_did_payload,
+):
+    """Verify that all five causal inference API endpoints coexist and operate without regressions."""
+    res1 = client.post("/api/causal/unadjusted-ate", json=example_causal_payload)
+    assert res1.status_code == 200
+    assert res1.json()["estimator"] == "unadjusted_difference_in_means"
+
+    res2 = client.post("/api/causal/regression-adjusted-ate", json=example_regression_causal_payload)
+    assert res2.status_code == 200
+    assert res2.json()["estimator"] == "regression_adjusted_ate"
+
+    res3 = client.post("/api/causal/propensity-scores", json=example_propensity_payload)
+    assert res3.status_code == 200
+    assert res3.json()["estimator"] == "logistic_propensity_score"
+
+    res4 = client.post("/api/causal/iptw-ate", json=example_iptw_payload)
+    assert res4.status_code == 200
+    assert res4.json()["estimator"] == "iptw_ate"
+
+    res5 = client.post("/api/causal/difference-in-differences", json=example_did_payload)
+    assert res5.status_code == 200
+    assert res5.json()["estimator"] == "difference_in_differences"
+
+
+
 
 
 

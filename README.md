@@ -14,7 +14,7 @@ A Python platform for A/B testing, causal inference, and statistical analysis, f
 - **Sample Size Estimation**: Power analysis (`NormalIndPower`) to determine required sample size per group and total sample size given baseline rate, expected rate, alpha, and power.
 - **Multiple Comparisons Corrections**: Family-wise error rate control using Bonferroni and Benjamini-Hochberg (FDR) adjustments.
 - **Automated Experiment Reporting**: Human-readable terminal output and CSV exports of experiment findings.
-- **FastAPI REST API**: High-performance backend endpoints exposing statistical testing, power analysis, and causal inference engines (unadjusted ATE with Welch CIs, regression-adjusted ATE via G-computation, propensity score estimation and overlap diagnostics, and IPTW treatment effect estimation with covariate balance and ESS diagnostics), complete with input validation and interactive OpenAPI documentation.
+- **FastAPI REST API**: High-performance backend endpoints exposing statistical testing, power analysis, and causal inference engines (unadjusted ATE with Welch CIs, regression-adjusted ATE via G-computation, propensity score estimation and overlap diagnostics, IPTW treatment effect estimation with covariate balance and ESS diagnostics, and Difference-in-Differences treatment effect estimation), complete with input validation and interactive OpenAPI documentation.
 
 ---
 
@@ -1055,6 +1055,136 @@ curl -X POST http://127.0.0.1:8000/api/causal/iptw-ate \
   - Invalid threshold: `"extreme_weight_threshold must be a positive finite number (> 0)."`
   - Missing values without opt-in: `"Missing values detected ... Set drop_missing=True to drop incomplete rows."`
   - Positivity violation: `"Positivity violation: observation(s) have an assigned-treatment probability of zero ... IPTW weighting would produce infinite weights."`
+
+- **Running Focused API Tests**:
+  ```powershell
+  # Windows PowerShell
+  .\.venv\Scripts\python.exe -m pytest tests/test_api.py -q
+  ```
+
+---
+
+### Difference-in-Differences (DiD)
+- **URL**: `POST /api/causal/difference-in-differences`
+- **Method**: `POST`
+- **Description**: Estimates the Average Treatment Effect on the Treated (ATT) using the canonical two-group, two-period Difference-in-Differences (DiD) estimator. Compares the observed before-and-after change in outcome for a treatment group against the contemporaneous before-and-after change observed in an untreated comparison group.
+- **Viva Concept: Understanding Difference-in-Differences**:
+  - **The Problem**: A simple before-and-after comparison in the treated group ($\bar{Y}_{T,\text{post}} - \bar{Y}_{T,\text{pre}}$) confuses treatment effects with general time trends, seasonality, or macroeconomic changes. A simple post-period cross-sectional comparison ($\bar{Y}_{T,\text{post}} - \bar{Y}_{C,\text{post}}$) confuses treatment effects with pre-existing baseline differences between groups.
+  - **The Solution**: DiD subtracts the control group's temporal trend from the treated group's temporal change:
+    $$\text{DiD} = (\bar{Y}_{T,\text{post}} - \bar{Y}_{T,\text{pre}}) - (\bar{Y}_{C,\text{post}} - \bar{Y}_{C,\text{pre}})$$
+  - **Four Group-Period Means**:
+    1. Treatment Pre ($\bar{Y}_{T,\text{pre}}$): Baseline mean outcome for the treatment cohort.
+    2. Treatment Post ($\bar{Y}_{T,\text{post}}$): Follow-up mean outcome for the treatment cohort.
+    3. Control Pre ($\bar{Y}_{C,\text{pre}}$): Baseline mean outcome for the comparison cohort.
+    4. Control Post ($\bar{Y}_{C,\text{post}}$): Follow-up mean outcome for the comparison cohort.
+  - **Two Group Trends**:
+    - Treatment Change ($\Delta_T = \bar{Y}_{T,\text{post}} - \bar{Y}_{T,\text{pre}}$).
+    - Control Change ($\Delta_C = \bar{Y}_{C,\text{post}} - \bar{Y}_{C,\text{pre}}$).
+    - $\text{DiD Estimate} = \Delta_T - \Delta_C$.
+- **Identifying Causal Assumptions**:
+  1. *Parallel Trends Assumption*: **Without the treatment, the treated group and comparison group would have followed similar outcome trends over the same period**:
+     $$E[Y(0)_{\text{post}} - Y(0)_{\text{pre}} \mid T = 1] = E[Y(0)_{\text{post}} - Y(0)_{\text{pre}} \mid T = 0]$$
+     *Crucial Viva Note*: A positive DiD estimate does **not**, by itself, prove that the treatment caused the change. The validity of the estimate rests entirely on the unobservable counterfactual that both groups would have evolved in parallel absent treatment. Because this implementation evaluates a single pre-period and single post-period, pre-intervention trends cannot be formally tested without multiple historical periods.
+  2. *No Anticipation of Treatment*: Units do not alter their behavior or outcomes in anticipation of the upcoming intervention before the post-treatment period begins.
+  3. *No Differential Concurrent Shocks*: No other contemporaneous external shock, marketing campaign, local regulation, or economic event affected the treatment group differently from the control group around the intervention period.
+  4. *Consistent Outcome Measurement & Stable Group Definitions*: The outcome is measured identically in both periods, and group membership does not shift dynamically across waves.
+  5. *No Spillover Effects (SUTVA)*: The intervention applied to treated units does not indirectly influence outcomes in the control group.
+  6. *Repeated Observations / Panel Caution*: DiD accommodates repeated cross-sections or longitudinal panel data, but individual observations must not be treated as independent when identical units are repeatedly measured across time.
+- **Request Parameters**:
+  - `data` (list of dicts, required): Non-empty list of observation records containing treatment, time period, and outcome.
+  - `treatment_col` (string, required): Treatment-group indicator column distinguishing treated from control units.
+  - `time_col` / `time_period_col` (string, required): Time-period indicator column distinguishing pre- from post-intervention.
+  - `outcome_col` (string, required): Numeric outcome column.
+  - `treated_value` (any, optional): Label identifying treated condition (inferred automatically if omitted).
+  - `control_value` / `untreated_value` (any, optional): Label identifying control condition (inferred automatically if omitted).
+  - `pre_value` / `pre_period_value` (any, optional): Label identifying pre-intervention period (inferred automatically if omitted).
+  - `post_value` / `post_period_value` (any, optional): Label identifying post-intervention period (inferred automatically if omitted).
+  - `drop_missing` (boolean, optional, default `false`): Whether to drop incomplete rows across treatment, time, or outcome columns.
+
+**Example Request**:
+```bash
+curl -X POST http://127.0.0.1:8000/api/causal/difference-in-differences \
+  -H "Content-Type: application/json" \
+  -d '{
+    "data": [
+      {"treatment": 1, "time": 0, "outcome": 9.0},
+      {"treatment": 1, "time": 0, "outcome": 11.0},
+      {"treatment": 1, "time": 1, "outcome": 15.0},
+      {"treatment": 1, "time": 1, "outcome": 17.0},
+      {"treatment": 0, "time": 0, "outcome": 7.0},
+      {"treatment": 0, "time": 0, "outcome": 9.0},
+      {"treatment": 0, "time": 1, "outcome": 10.0},
+      {"treatment": 0, "time": 1, "outcome": 12.0}
+    ],
+    "treatment_col": "treatment",
+    "time_col": "time",
+    "outcome_col": "outcome",
+    "treated_value": 1,
+    "control_value": 0,
+    "pre_value": 0,
+    "post_value": 1,
+    "drop_missing": false
+  }'
+```
+
+**Example Response (200 OK)**:
+```json
+{
+  "estimator": "difference_in_differences",
+  "did_estimate": 3.0,
+  "did": 3.0,
+  "ate": 3.0,
+  "treatment_mean_pre": 10.0,
+  "treatment_mean_post": 16.0,
+  "control_mean_pre": 8.0,
+  "control_mean_post": 11.0,
+  "treated_mean_pre": 10.0,
+  "treated_mean_post": 16.0,
+  "treatment_change": 6.0,
+  "control_change": 3.0,
+  "delta_treatment": 6.0,
+  "delta_control": 3.0,
+  "delta_treated": 6.0,
+  "cell_counts": {
+    "treatment_pre": 2,
+    "treatment_post": 2,
+    "control_pre": 2,
+    "control_post": 2
+  },
+  "n_treatment_pre": 2,
+  "n_treatment_post": 2,
+  "n_control_pre": 2,
+  "n_control_post": 2,
+  "n_treated_pre": 2,
+  "n_treated_post": 2,
+  "n_treated": 4,
+  "n_control": 4,
+  "n_untreated": 4,
+  "n_total": 8,
+  "rows_dropped": 0,
+  "treatment_col": "treatment",
+  "time_col": "time",
+  "time_period_col": "time",
+  "outcome_col": "outcome",
+  "treated_value": 1,
+  "control_value": 0,
+  "untreated_value": 0,
+  "pre_value": 0,
+  "post_value": 1,
+  "interpretation": "The Difference-in-Differences (DiD) treatment effect estimate is 3.0000. Treatment group outcome changed by 6.0000 (from 10.0000 pre-intervention to 16.0000 post-intervention; n_pre=2, n_post=2). Control group outcome changed by 3.0000 (from 8.0000 pre-intervention to 11.0000 post-intervention; n_pre=2, n_post=2).",
+  "assumptions": "Difference-in-Differences (DiD) identifies the causal treatment effect under five core assumptions: (1) Parallel Trends ... (2) No Anticipation ... (3) No Differential Concurrent Shocks ... (4) Consistent Measurement ... (5) No Spillover Effects (SUTVA)..."
+}
+```
+
+- **Example Validation Errors (422 Unprocessable Content)**:
+  - Empty dataset: `"data cannot be empty. Causal inference requires observations."`
+  - Missing time column: `"time_col (or time_period_col) must be provided as a non-empty string."`
+  - Column role conflict: `"treatment_col and time_col cannot be the same column ('treatment')."`
+  - Single treatment condition: `"Treatment column 'treatment' contains only 1 unique value ... Difference-in-Differences requires both treated and control observations."`
+  - Single time period: `"Time-period column 'time' contains only 1 unique value ... Difference-in-Differences requires both pre- and post-intervention periods."`
+  - Empty cell in 2x2 design: `"Difference-in-Differences requires at least one observation in all four group-period cells. Empty cell(s) found: Control Post (treatment=0, period=1)."`
+  - Non-numeric outcome: `"Outcome column 'outcome' must be numeric, but contains boolean values."`
+  - Missing values without opt-in: `"Dataset contains missing values in required columns ... Set drop_missing=True to explicitly drop incomplete observations."`
 
 - **Running Focused API Tests**:
   ```powershell
