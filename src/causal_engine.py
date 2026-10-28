@@ -32,10 +32,12 @@ Causal Data Model Overview:
      the required analysis columns are dropped, and the count of dropped rows is tracked.
 """
 
+import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
+import scipy.stats as stats
 
 
 def _to_dataframe(data: Any) -> pd.DataFrame:
@@ -367,6 +369,177 @@ def validate_causal_data(
     }
 
 
+def _validate_confidence_level(confidence_level: Any) -> float:
+    """Validate that confidence_level is a valid numeric probability strictly between 0 and 1.
+
+    Parameters:
+    -----------
+    confidence_level : Any
+        Input confidence level to validate.
+
+    Returns:
+    --------
+    float
+        Validated confidence level as float.
+
+    Raises:
+    -------
+    ValueError:
+        If confidence_level is None, boolean, string, non-numeric, NaN, infinite,
+        or not strictly within (0.0, 1.0).
+    """
+    if confidence_level is None:
+        raise ValueError(
+            "confidence_level cannot be None. It must be a numeric float strictly between 0 and 1."
+        )
+    if isinstance(confidence_level, bool):
+        raise ValueError(
+            "confidence_level cannot be a boolean. It must be a numeric float strictly between 0 and 1."
+        )
+    if not isinstance(confidence_level, (int, float)):
+        raise ValueError(
+            f"confidence_level must be a numeric float strictly between 0 and 1, got {type(confidence_level).__name__}."
+        )
+    if math.isnan(confidence_level) or math.isinf(confidence_level):
+        raise ValueError("confidence_level cannot be NaN or infinite.")
+
+    conf = float(confidence_level)
+    if not (0.0 < conf < 1.0):
+        raise ValueError(
+            f"confidence_level must be strictly between 0 and 1 (exclusive), got {confidence_level}."
+        )
+    return conf
+
+
+def _calculate_welch_uncertainty(
+    treated_outcomes: pd.Series,
+    untreated_outcomes: pd.Series,
+    confidence_level: float,
+    raise_on_zero_variance: bool = False,
+) -> Dict[str, Any]:
+    """Calculate Welch-Satterthwaite standard error, degrees of freedom, and confidence interval.
+
+    Parameters:
+    -----------
+    treated_outcomes : pd.Series
+        Numeric outcome series for the treated group.
+    untreated_outcomes : pd.Series
+        Numeric outcome series for the control/untreated group.
+    confidence_level : float
+        Two-sided confidence level (must be strictly between 0 and 1).
+    raise_on_zero_variance : bool, default False
+        If True, raises ValueError when both treatment groups have zero sample variance.
+        If False, returns None for confidence interval and degrees of freedom with a warning,
+        avoiding misleading finite intervals when sampling variance is undefined.
+
+    Returns:
+    --------
+    Dict[str, Any]
+        Dictionary with sample variances, standard error, Welch-Satterthwaite degrees
+        of freedom, critical t value, and two-sided confidence interval bounds.
+
+    Raises:
+    -------
+    ValueError:
+        If either group has fewer than 2 observations, confidence_level is invalid,
+        or if both groups have zero variance and raise_on_zero_variance is True.
+    """
+    conf = _validate_confidence_level(confidence_level)
+
+    n_treated = len(treated_outcomes)
+    n_control = len(untreated_outcomes)
+
+    if n_treated < 2 or n_control < 2:
+        raise ValueError(
+            f"Both treated and control groups must contain at least 2 observations to compute "
+            f"sample variance and Welch confidence intervals. Got n_treated={n_treated}, n_control={n_control}."
+        )
+
+    var_treated = float(np.var(treated_outcomes, ddof=1))
+    var_control = float(np.var(untreated_outcomes, ddof=1))
+
+    # Edge Case: Zero variance in both groups
+    if var_treated == 0.0 and var_control == 0.0:
+        if raise_on_zero_variance:
+            raise ValueError(
+                "Both treatment groups have zero variance (all outcomes within each group are identical). "
+                "Welch degrees of freedom and confidence intervals are undefined."
+            )
+        # Mathematically justified special case: sampling variance is zero,
+        # but t-distribution df is undefined (0/0). Do not return misleading finite CI.
+        warning_msg = (
+            "Both treatment groups have zero sample variance (all outcomes within each group are identical). "
+            "Welch-Satterthwaite degrees of freedom and confidence intervals are undefined."
+        )
+        res_zero: Dict[str, Any] = {
+            "variance_treated": 0.0,
+            "variance_control": 0.0,
+            "std_error": 0.0,
+            "se": 0.0,
+            "degrees_of_freedom": None,
+            "df": None,
+            "confidence_level": conf,
+            "t_critical": None,
+            "critical_value": None,
+            "margin_of_error": None,
+            "confidence_interval": None,
+            "ci_lower": None,
+            "ci_upper": None,
+            "warning": warning_msg,
+        }
+        if abs(conf - 0.95) < 1e-9:
+            res_zero["confidence_interval_95"] = None
+        return res_zero
+
+    v_treated = var_treated / n_treated
+    v_control = var_control / n_control
+
+    # Edge Case: Zero variance in exactly one group
+    if var_treated == 0.0:
+        df = float(n_control - 1)
+        se = float(math.sqrt(v_control))
+    elif var_control == 0.0:
+        df = float(n_treated - 1)
+        se = float(math.sqrt(v_treated))
+    else:
+        se = float(math.sqrt(v_treated + v_control))
+        denom = (v_treated**2 / (n_treated - 1)) + (v_control**2 / (n_control - 1))
+        df = float((v_treated + v_control) ** 2 / denom)
+
+    # Student's t critical value for two-sided confidence interval
+    alpha = 1.0 - conf
+    t_crit = float(stats.t.ppf(1.0 - alpha / 2.0, df=df))
+    margin_of_error = float(t_crit * se)
+
+    mean_treated = float(treated_outcomes.mean())
+    mean_control = float(untreated_outcomes.mean())
+    estimate = float(mean_treated - mean_control)
+
+    ci_lower = float(estimate - margin_of_error)
+    ci_upper = float(estimate + margin_of_error)
+
+    res: Dict[str, Any] = {
+        "variance_treated": var_treated,
+        "variance_control": var_control,
+        "std_error": se,
+        "se": se,
+        "degrees_of_freedom": df,
+        "df": df,
+        "confidence_level": conf,
+        "t_critical": t_crit,
+        "critical_value": t_crit,
+        "margin_of_error": margin_of_error,
+        "confidence_interval": [ci_lower, ci_upper],
+        "ci_lower": ci_lower,
+        "ci_upper": ci_upper,
+    }
+
+    if abs(conf - 0.95) < 1e-9:
+        res["confidence_interval_95"] = [ci_lower, ci_upper]
+
+    return res
+
+
 def estimate_unadjusted_ate(
     data: Any,
     treatment_col: str,
@@ -375,35 +548,50 @@ def estimate_unadjusted_ate(
     treated_value: Optional[Any] = None,
     untreated_value: Optional[Any] = None,
     drop_missing: bool = False,
+    confidence_level: float = 0.95,
+    compute_ci: bool = True,
+    raise_on_zero_variance: bool = False,
 ) -> Dict[str, Any]:
-    """Estimate the unadjusted Average Treatment Effect (ATE) as the difference in sample outcome means.
+    """Estimate the unadjusted Average Treatment Effect (ATE) with Welch-style uncertainty.
 
     Methodology & Formula:
     ----------------------
-    The unadjusted ATE estimator computes the difference between the mean outcome of the
-    treated group and the mean outcome of the control/untreated group:
+    1. Point Estimate (Difference in Means):
+       The unadjusted ATE estimator computes the difference between the mean outcome of the
+       treated group and the mean outcome of the control/untreated group:
 
-        ATE_unadjusted = mean(Y | T = 1) - mean(Y | T = 0)
+           ATE_unadjusted = mean(Y | T = 1) - mean(Y | T = 0)
 
-    where:
-    - mean(Y | T = 1) is the sample average of the outcome among treated units.
-    - mean(Y | T = 0) is the sample average of the outcome among control units.
+    2. Welch Standard Error:
+       Allowing for unequal population variances across treatment groups, the Welch standard error is:
 
-    Causal Identification & Confounding Disclaimer:
-    ------------------------------------------------
-    - In a fully randomized controlled trial (RCT) with compliant subjects, treatment assignment
-      T is independent of potential outcomes (Y(1), Y(0) ⫫ T). Under these conditions, the
-      unadjusted difference in means is an unbiased and consistent estimator of the true
-      Average Treatment Effect: E[Y(1) - Y(0)].
-    - In observational studies or non-randomized settings, treatment assignment is typically
-      correlated with confounding covariates X. The observed difference in means equals:
-          E[Y | T = 1] - E[Y | T = 0] = ATE + Selection Bias / Confounding Bias
-      This estimator does NOT control or adjust for observed confounders.
-    - Important: This function does NOT prove causality or eliminate confounding bias.
-      For observational data, adjustment methods (such as regression adjustment, propensity
-      score matching, or weighting) are generally required.
-    - Note: In this baseline task, this function returns the unadjusted point estimate only.
-      Hypothesis testing p-values and confidence intervals are not computed here.
+           SE = sqrt(s_treated^2 / n_treated + s_control^2 / n_control)
+
+       where each sample variance s^2 uses sample-variance denominator (n - 1).
+
+    3. Welch–Satterthwaite Degrees of Freedom:
+       Let v_treated = s_treated^2 / n_treated and v_control = s_control^2 / n_control.
+       The effective degrees of freedom df is:
+
+           df = (v_treated + v_control)^2 / [v_treated^2 / (n_treated - 1) + v_control^2 / (n_control - 1)]
+
+    4. Two-Sided Confidence Interval:
+       Given confidence level (1 - alpha), the critical value t_crit is the (1 - alpha / 2)
+       quantile of the Student t distribution with df degrees of freedom:
+
+           CI = estimate +/- t_crit * SE
+
+    Statistical & Causal Interpretation:
+    ------------------------------------
+    - Sampling Uncertainty: The confidence interval quantifies sampling variability under repeated
+      sampling from the same population under the estimator's sampling assumptions.
+    - Important Distinction: A 95% confidence interval does NOT mean there is a 95% probability
+      that the fixed true effect lies inside this particular realized interval.
+    - Causal Confounding Disclaimer: A confidence interval measures statistical sampling precision,
+      NOT causal validity. In observational studies or non-randomized settings, treatment assignment
+      may be correlated with confounding variables. The confidence interval does NOT eliminate
+      confounding bias or prove causality. Adjustment methods (e.g. regression adjustment,
+      propensity score weighting/matching) are required for causal identification with observational data.
 
     Parameters:
     -----------
@@ -423,6 +611,11 @@ def estimate_unadjusted_ate(
         Explicit missing data policy (reused from validate_causal_data):
         - If False (default): raises ValueError if any missing values exist in analysis columns.
         - If True: drops rows containing missing values and records the count.
+    confidence_level : float, default 0.95
+        Two-sided confidence level for the Welch confidence interval, strictly between 0 and 1.
+    compute_ci : bool, default True
+        Whether to calculate Welch standard error and confidence interval. When True, both
+        groups must contain at least 2 observations and cannot both have zero variance.
 
     Returns:
     --------
@@ -431,11 +624,11 @@ def estimate_unadjusted_ate(
         - 'estimator': 'unadjusted_difference_in_means'
         - 'ate': Unadjusted average treatment effect estimate (treated mean - control mean)
         - 'unadjusted_ate': Alias for 'ate'
+        - 'difference_in_means': Alias for 'ate'
         - 'mean_outcome_treated': Mean outcome in the treated group
         - 'mean_outcome_control': Mean outcome in the control/untreated group
         - 'outcome_mean_treated': Alias for mean_outcome_treated
         - 'outcome_mean_untreated': Alias for mean_outcome_control
-        - 'difference_in_means': Alias for 'ate'
         - 'n_total': Total number of validated observations
         - 'n_treated': Count of treated observations
         - 'n_control': Count of control observations
@@ -448,12 +641,28 @@ def estimate_unadjusted_ate(
         - 'control_value': Alias for 'untreated_value'
         - 'rows_dropped': Number of rows dropped due to missing data (0 if drop_missing=False)
         - 'assumptions': Educational explanation of identifying assumptions and confounding limitations
+        When compute_ci=True, additionally includes:
+        - 'variance_treated': Sample variance of treated group (ddof=1)
+        - 'variance_control': Sample variance of control group (ddof=1)
+        - 'std_error': Welch standard error of the difference in means
+        - 'se': Alias for 'std_error'
+        - 'degrees_of_freedom': Welch-Satterthwaite degrees of freedom
+        - 'df': Alias for 'degrees_of_freedom'
+        - 'confidence_level': Configured confidence level (e.g. 0.95)
+        - 't_critical': Two-sided Student t critical value
+        - 'critical_value': Alias for 't_critical'
+        - 'margin_of_error': Half-width of the confidence interval (t_critical * SE)
+        - 'confidence_interval': Two-element list [ci_lower, ci_upper]
+        - 'ci_lower': Lower bound of the confidence interval
+        - 'ci_upper': Upper bound of the confidence interval
+        - 'confidence_interval_95': Two-element list when confidence_level == 0.95
+        - 'interpretation': Clear statement clarifying sampling vs causal interpretation
 
     Raises:
     -------
     ValueError:
-        If the data fails any structural, treatment, outcome, or confounder validation rules
-        enforced by validate_causal_data.
+        If data validation fails, confidence_level is invalid, fewer than 2 observations
+        exist per group when compute_ci=True, or both groups have zero variance.
     """
     # 1. Reuse validate_causal_data for comprehensive prerequisite verification
     v = validate_causal_data(
@@ -466,6 +675,13 @@ def estimate_unadjusted_ate(
         drop_missing=drop_missing,
     )
 
+    df_validated = v["validated_data"]
+    treatment_series = df_validated[v["treatment_col"]]
+    numeric_outcomes = pd.to_numeric(df_validated[v["outcome_col"]])
+    treated_mask = treatment_series == v["treated_value"]
+    treated_outcomes = numeric_outcomes[treated_mask]
+    untreated_outcomes = numeric_outcomes[~treated_mask]
+
     mean_treated = float(v["outcome_mean_treated"])
     mean_control = float(v["outcome_mean_untreated"])
     ate = float(mean_treated - mean_control)
@@ -473,10 +689,13 @@ def estimate_unadjusted_ate(
     assumptions_text = (
         "Unadjusted difference in means reflects the true Average Treatment Effect (ATE) only under "
         "randomized treatment assignment (exchangeability: (Y(1), Y(0)) ⫫ T). In observational data, "
-        "confounding bias can distort this estimate, and this estimator does not adjust for confounders."
+        "confounding bias can distort this estimate; this estimator does not adjust for confounders. "
+        "The confidence interval quantifies sampling variability under the estimator's sampling "
+        "assumptions. It does not represent a probability that the fixed true effect lies within this "
+        "particular interval, nor does it remove confounding or establish causal identification."
     )
 
-    return {
+    result: Dict[str, Any] = {
         "estimator": "unadjusted_difference_in_means",
         "ate": ate,
         "unadjusted_ate": ate,
@@ -498,3 +717,61 @@ def estimate_unadjusted_ate(
         "rows_dropped": int(v["rows_dropped"]),
         "assumptions": assumptions_text,
     }
+
+    if compute_ci:
+        unc = _calculate_welch_uncertainty(
+            treated_outcomes=treated_outcomes,
+            untreated_outcomes=untreated_outcomes,
+            confidence_level=confidence_level,
+            raise_on_zero_variance=raise_on_zero_variance,
+        )
+        result.update(unc)
+        pct = (
+            int(unc["confidence_level"] * 100)
+            if unc["confidence_level"] * 100 == int(unc["confidence_level"] * 100)
+            else unc["confidence_level"] * 100
+        )
+        if unc["ci_lower"] is not None and unc["ci_upper"] is not None:
+            result["interpretation"] = (
+                f"The {pct}% confidence interval [{unc['ci_lower']:.4f}, {unc['ci_upper']:.4f}] "
+                f"quantifies sampling uncertainty around the difference in means ({ate:.4f}). "
+                "Under repeated sampling, 95% of such intervals cover the true difference in means if model "
+                "assumptions hold. It does not mean a 95% probability of the true parameter being inside "
+                "this realized interval, nor does it remove confounding bias for observational data."
+            )
+        else:
+            result["interpretation"] = (
+                f"The difference in means is {ate:.4f}. Because both groups have zero variance, "
+                "degrees of freedom and confidence intervals are undefined under the Welch t model."
+            )
+
+    return result
+
+
+def estimate_unadjusted_ate_with_uncertainty(
+    data: Any,
+    treatment_col: str,
+    outcome_col: str,
+    confounder_cols: Optional[Sequence[str]] = None,
+    treated_value: Optional[Any] = None,
+    untreated_value: Optional[Any] = None,
+    drop_missing: bool = False,
+    confidence_level: float = 0.95,
+    raise_on_zero_variance: bool = False,
+) -> Dict[str, Any]:
+    """Estimate the unadjusted ATE with Welch-style standard error and confidence interval.
+
+    Dedicated alias for estimate_unadjusted_ate(..., compute_ci=True).
+    """
+    return estimate_unadjusted_ate(
+        data=data,
+        treatment_col=treatment_col,
+        outcome_col=outcome_col,
+        confounder_cols=confounder_cols,
+        treated_value=treated_value,
+        untreated_value=untreated_value,
+        drop_missing=drop_missing,
+        confidence_level=confidence_level,
+        compute_ci=True,
+        raise_on_zero_variance=raise_on_zero_variance,
+    )
