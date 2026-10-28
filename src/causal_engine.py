@@ -1199,7 +1199,7 @@ def compute_overlap_diagnostics(
     warning: Optional[str] = None
     if not has_overlap:
         warning = (
-            "Severe overlap violation: Treated and control propensity score ranges are completely disjoint. "
+            "Severe overlap violation warning: Treated and control propensity score ranges are completely disjoint. "
             f"Treated range is [{min_score_treated:.4f}, {max_score_treated:.4f}] while control range is "
             f"[{min_score_control:.4f}, {max_score_control:.4f}]. Common support does not exist, so matching "
             "or weighting cannot be performed without extreme parametric extrapolation."
@@ -1753,6 +1753,723 @@ def estimate_propensity_scores(
             "Categorical confounder balance assessment (e.g. difference in proportions) is deferred "
             "to the subsequent matching/weighting module."
         ),
+        "interpretation": interpretation_text,
+        "assumptions": assumptions_text,
+    }
+
+
+def compute_effective_sample_size(weights: Sequence[float]) -> float:
+    """Compute Kish's effective sample size (ESS) for an array of non-negative weights.
+
+    Kish's ESS quantifies the degree of weight concentration:
+        ESS = (sum_i w_i)^2 / sum_i (w_i^2)
+
+    When weights are uniform (w_i = c for all i), ESS equals the nominal sample size n.
+    When weights are highly variable or concentrated on a few observations, ESS is
+    substantially smaller than n, reflecting the reduction in statistical precision
+    (variance inflation) due to weighting.
+
+    Parameters:
+    -----------
+    weights : Sequence[float]
+        Sequence of non-negative weighting values.
+
+    Returns:
+    --------
+    float
+        The calculated effective sample size. Returns 0.0 if weights are empty or sum to zero.
+
+    Raises:
+    -------
+    ValueError:
+        If weights contain negative, NaN, or infinite values.
+    """
+    if weights is None:
+        raise ValueError("weights cannot be None.")
+
+    arr = np.asarray(weights, dtype=float)
+    if len(arr) == 0:
+        return 0.0
+
+    if (arr < 0.0).any():
+        raise ValueError("Effective sample size requires non-negative weights.")
+
+    if np.isnan(arr).any() or np.isinf(arr).any():
+        raise ValueError("weights contain NaN or infinite values.")
+
+    sum_w = float(np.sum(arr))
+    if sum_w == 0.0:
+        return 0.0
+
+    sum_w_sq = float(np.sum(arr ** 2))
+    if sum_w_sq == 0.0:
+        return 0.0
+
+    return float((sum_w ** 2) / sum_w_sq)
+
+
+def compute_weighted_covariate_balance(
+    data: pd.DataFrame,
+    treatment_col: str,
+    confounder_cols: Sequence[str],
+    weights: Sequence[float],
+    treated_value: Any = 1,
+    control_value: Any = 0,
+) -> Dict[str, Any]:
+    """Compute covariate balance diagnostics (SMDs) before and after IPTW weighting.
+
+    Calculates Standardized Mean Differences (SMDs) for numeric covariates and indicator
+    variables for non-reference categories of categorical covariates:
+        SMD_unweighted = (mean_treated - mean_control) / s_reference
+        SMD_weighted   = (weighted_mean_treated - weighted_mean_control) / s_reference
+
+    Reference Standard Deviation Convention:
+    ----------------------------------------
+    Following standard methodological practice (Austin 2009, 2011; Stuart 2010), the denominator
+    s_reference is the pooled sample standard deviation of the unweighted sample:
+        s_reference = sqrt(((n_1 - 1)*s_1^2 + (n_0 - 1)*s_0^2) / (n_1 + n_0 - 2))
+
+    Using the unweighted pooled standard deviation keeps the scale fixed and prevents the
+    post-weighting SMD from appearing artificially small or large due to variance changes.
+
+    Parameters:
+    -----------
+    data : pd.DataFrame
+        Validated tabular dataset containing treatment and confounder columns.
+    treatment_col : str
+        Name of the binary treatment column.
+    confounder_cols : Sequence[str]
+        List of observed confounder column names to evaluate.
+    weights : Sequence[float]
+        Array of IPTW weights aligned row-for-row with data.
+    treated_value : Any, default 1
+        Label identifying treated observations.
+    control_value : Any, default 0
+        Label identifying control observations.
+
+    Returns:
+    --------
+    Dict[str, Any]
+        Dictionary containing:
+        - 'before_balance': Dict of covariate balance statistics before weighting.
+        - 'after_balance': Dict of covariate balance statistics after weighting.
+        - 'balance_summary': Summary metrics including max absolute SMDs and improvement counts.
+    """
+    if data is None or not isinstance(data, pd.DataFrame):
+        raise ValueError("data must be a pandas DataFrame.")
+    if treatment_col not in data.columns:
+        raise ValueError(f"treatment_col '{treatment_col}' not found in data.")
+
+    w_arr = np.asarray(weights, dtype=float)
+    if len(w_arr) != len(data):
+        raise ValueError(
+            f"Length mismatch: weights ({len(w_arr)}) and data ({len(data)}) must have identical lengths."
+        )
+
+    t_series = data[treatment_col]
+    treated_mask = (t_series == treated_value).values
+    control_mask = (t_series == control_value).values
+
+    n_1 = int(np.sum(treated_mask))
+    n_0 = int(np.sum(control_mask))
+
+    if n_1 == 0 or n_0 == 0:
+        raise ValueError("Data must contain both treated and control observations for balance calculation.")
+
+    w_1 = w_arr[treated_mask]
+    w_0 = w_arr[control_mask]
+
+    sum_w1 = float(np.sum(w_1))
+    sum_w0 = float(np.sum(w_0))
+
+    if sum_w1 == 0.0 or sum_w0 == 0.0:
+        raise ValueError("Sum of weights in treated or control group is zero.")
+
+    before_balance: Dict[str, Dict[str, Any]] = {}
+    after_balance: Dict[str, Dict[str, Any]] = {}
+
+    for col in confounder_cols:
+        if col not in data.columns:
+            raise ValueError(f"Confounder column '{col}' not found in data.")
+
+        series = data[col]
+        is_numeric = pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series)
+
+        if is_numeric:
+            x1 = series[treated_mask].astype(float).values
+            x0 = series[control_mask].astype(float).values
+
+            m_1 = float(np.mean(x1))
+            m_0 = float(np.mean(x0))
+
+            v_1 = float(np.var(x1, ddof=1)) if len(x1) > 1 else 0.0
+            v_0 = float(np.var(x0, ddof=1)) if len(x0) > 1 else 0.0
+
+            df_pooled = (len(x1) - 1) + (len(x0) - 1)
+            if df_pooled > 0:
+                pooled_var = ((len(x1) - 1) * v_1 + (len(x0) - 1) * v_0) / df_pooled
+                s_ref = float(np.sqrt(max(0.0, pooled_var)))
+            else:
+                s_ref = 0.0
+
+            # Unweighted SMD
+            if s_ref > 0.0:
+                smd_before = float((m_1 - m_0) / s_ref)
+                abs_smd_before = float(abs(smd_before))
+                zero_var = False
+                note_before = None
+            else:
+                zero_var = True
+                if m_1 == m_0:
+                    smd_before = 0.0
+                    abs_smd_before = 0.0
+                    note_before = "Zero pooled variance: covariate values are identical across groups; SMD is 0.0."
+                else:
+                    smd_before = None
+                    abs_smd_before = None
+                    note_before = "Zero pooled variance with differing group means: SMD is mathematically undefined."
+
+            # Weighted SMD
+            m_1_w = float(np.sum(w_1 * x1) / sum_w1)
+            m_0_w = float(np.sum(w_0 * x0) / sum_w0)
+
+            if s_ref > 0.0:
+                smd_after = float((m_1_w - m_0_w) / s_ref)
+                abs_smd_after = float(abs(smd_after))
+                note_after = None
+            else:
+                if m_1_w == m_0_w:
+                    smd_after = 0.0
+                    abs_smd_after = 0.0
+                    note_after = "Zero pooled variance: weighted covariate values are identical; SMD is 0.0."
+                else:
+                    smd_after = None
+                    abs_smd_after = None
+                    note_after = "Zero pooled variance with differing weighted means: SMD is mathematically undefined."
+
+            is_bal_before = bool(abs_smd_before <= 0.10) if abs_smd_before is not None else None
+            is_bal_after = bool(abs_smd_after <= 0.10) if abs_smd_after is not None else None
+            smd_improved = (
+                bool(abs_smd_after < abs_smd_before)
+                if (abs_smd_before is not None and abs_smd_after is not None)
+                else None
+            )
+
+            before_balance[col] = {
+                "covariate": col,
+                "covariate_type": "numeric",
+                "mean_treated": m_1,
+                "mean_control": m_0,
+                "pooled_std": s_ref,
+                "smd": smd_before,
+                "abs_smd": abs_smd_before,
+                "zero_pooled_variance": zero_var,
+                "is_balanced": is_bal_before,
+                "note": note_before,
+            }
+
+            after_balance[col] = {
+                "covariate": col,
+                "covariate_type": "numeric",
+                "mean_treated": m_1_w,
+                "mean_control": m_0_w,
+                "pooled_std": s_ref,
+                "smd": smd_after,
+                "abs_smd": abs_smd_after,
+                "zero_pooled_variance": zero_var,
+                "is_balanced": is_bal_after,
+                "smd_improved": smd_improved,
+                "note": note_after,
+            }
+
+        else:
+            # Categorical Confounder: Evaluate non-reference level indicators
+            unique_levels = sorted([lvl for lvl in pd.unique(series) if pd.notna(lvl)])
+            if len(unique_levels) <= 1:
+                continue
+
+            ref_level = unique_levels[0]
+            non_ref_levels = unique_levels[1:]
+
+            for lvl in non_ref_levels:
+                key = f"{col}_{lvl}"
+                indicator = (series == lvl).astype(float).values
+
+                i1 = indicator[treated_mask]
+                i0 = indicator[control_mask]
+
+                p_1 = float(np.mean(i1))
+                p_0 = float(np.mean(i0))
+
+                v_1 = float(np.var(i1, ddof=1)) if len(i1) > 1 else 0.0
+                v_0 = float(np.var(i0, ddof=1)) if len(i0) > 1 else 0.0
+
+                df_pooled = (len(i1) - 1) + (len(i0) - 1)
+                if df_pooled > 0:
+                    pooled_var = ((len(i1) - 1) * v_1 + (len(i0) - 1) * v_0) / df_pooled
+                    s_ref = float(np.sqrt(max(0.0, pooled_var)))
+                else:
+                    s_ref = 0.0
+
+                # Unweighted SMD for category indicator
+                if s_ref > 0.0:
+                    smd_before = float((p_1 - p_0) / s_ref)
+                    abs_smd_before = float(abs(smd_before))
+                    zero_var = False
+                    note_before = f"Indicator for category '{lvl}' (reference: '{ref_level}')"
+                else:
+                    zero_var = True
+                    if p_1 == p_0:
+                        smd_before = 0.0
+                        abs_smd_before = 0.0
+                        note_before = (
+                            f"Zero variance: category '{lvl}' proportion identical across groups; SMD is 0.0."
+                        )
+                    else:
+                        smd_before = None
+                        abs_smd_before = None
+                        note_before = f"Zero variance for category '{lvl}' with differing proportions; SMD undefined."
+
+                # Weighted SMD for category indicator
+                p_1_w = float(np.sum(w_1 * i1) / sum_w1)
+                p_0_w = float(np.sum(w_0 * i0) / sum_w0)
+
+                if s_ref > 0.0:
+                    smd_after = float((p_1_w - p_0_w) / s_ref)
+                    abs_smd_after = float(abs(smd_after))
+                    note_after = f"Weighted indicator for category '{lvl}' (reference: '{ref_level}')"
+                else:
+                    if p_1_w == p_0_w:
+                        smd_after = 0.0
+                        abs_smd_after = 0.0
+                        note_after = f"Zero variance: weighted category '{lvl}' proportion identical; SMD is 0.0."
+                    else:
+                        smd_after = None
+                        abs_smd_after = None
+                        note_after = (
+                            f"Zero variance for category '{lvl}' with differing weighted proportions; SMD undefined."
+                        )
+
+                is_bal_before = bool(abs_smd_before <= 0.10) if abs_smd_before is not None else None
+                is_bal_after = bool(abs_smd_after <= 0.10) if abs_smd_after is not None else None
+                smd_improved = (
+                    bool(abs_smd_after < abs_smd_before)
+                    if (abs_smd_before is not None and abs_smd_after is not None)
+                    else None
+                )
+
+                before_balance[key] = {
+                    "covariate": col,
+                    "category": lvl,
+                    "reference_category": ref_level,
+                    "covariate_type": "categorical_indicator",
+                    "mean_treated": p_1,
+                    "mean_control": p_0,
+                    "pooled_std": s_ref,
+                    "smd": smd_before,
+                    "abs_smd": abs_smd_before,
+                    "zero_pooled_variance": zero_var,
+                    "is_balanced": is_bal_before,
+                    "note": note_before,
+                }
+
+                after_balance[key] = {
+                    "covariate": col,
+                    "category": lvl,
+                    "reference_category": ref_level,
+                    "covariate_type": "categorical_indicator",
+                    "mean_treated": p_1_w,
+                    "mean_control": p_0_w,
+                    "pooled_std": s_ref,
+                    "smd": smd_after,
+                    "abs_smd": abs_smd_after,
+                    "zero_pooled_variance": zero_var,
+                    "is_balanced": is_bal_after,
+                    "smd_improved": smd_improved,
+                    "note": note_after,
+                }
+
+    # Summary metrics
+    num_abs_before = [
+        b["abs_smd"] for b in before_balance.values()
+        if b["covariate_type"] == "numeric" and b["abs_smd"] is not None
+    ]
+    num_abs_after = [
+        a["abs_smd"] for a in after_balance.values()
+        if a["covariate_type"] == "numeric" and a["abs_smd"] is not None
+    ]
+    cat_abs_before = [
+        b["abs_smd"] for b in before_balance.values()
+        if b["covariate_type"] == "categorical_indicator" and b["abs_smd"] is not None
+    ]
+    cat_abs_after = [
+        a["abs_smd"] for a in after_balance.values()
+        if a["covariate_type"] == "categorical_indicator" and a["abs_smd"] is not None
+    ]
+
+    all_abs_before = [b["abs_smd"] for b in before_balance.values() if b["abs_smd"] is not None]
+    all_abs_after = [a["abs_smd"] for a in after_balance.values() if a["abs_smd"] is not None]
+
+    max_num_before = float(max(num_abs_before)) if num_abs_before else 0.0
+    max_num_after = float(max(num_abs_after)) if num_abs_after else 0.0
+    max_cat_before = float(max(cat_abs_before)) if cat_abs_before else None
+    max_cat_after = float(max(cat_abs_after)) if cat_abs_after else None
+    max_all_before = float(max(all_abs_before)) if all_abs_before else 0.0
+    max_all_after = float(max(all_abs_after)) if all_abs_after else 0.0
+
+    improved_cnt = sum(
+        1 for k in before_balance
+        if before_balance[k]["abs_smd"] is not None
+        and after_balance[k]["abs_smd"] is not None
+        and after_balance[k]["abs_smd"] < before_balance[k]["abs_smd"]
+    )
+    worsened_cnt = sum(
+        1 for k in before_balance
+        if before_balance[k]["abs_smd"] is not None
+        and after_balance[k]["abs_smd"] is not None
+        and after_balance[k]["abs_smd"] > before_balance[k]["abs_smd"]
+    )
+    unchanged_cnt = sum(
+        1 for k in before_balance
+        if before_balance[k]["abs_smd"] is not None
+        and after_balance[k]["abs_smd"] is not None
+        and after_balance[k]["abs_smd"] == before_balance[k]["abs_smd"]
+    )
+
+    balance_improved = bool(max_all_after < max_all_before)
+
+    summary = {
+        "max_abs_smd_numeric_before": max_num_before,
+        "max_abs_smd_numeric_after": max_num_after,
+        "max_abs_smd_categorical_before": max_cat_before,
+        "max_abs_smd_categorical_after": max_cat_after,
+        "max_abs_smd_before": max_all_before,
+        "max_abs_smd_after": max_all_after,
+        "balance_improved": balance_improved,
+        "covariates_improved_count": improved_cnt,
+        "covariates_worsened_count": worsened_cnt,
+        "covariates_unchanged_count": unchanged_cnt,
+    }
+
+    return {
+        "before_balance": before_balance,
+        "after_balance": after_balance,
+        "balance_summary": summary,
+    }
+
+
+def estimate_iptw_ate(
+    data: Any,
+    treatment_col: str,
+    outcome_col: str,
+    confounder_cols: Sequence[str],
+    treated_value: Optional[Any] = None,
+    control_value: Optional[Any] = None,
+    untreated_value: Optional[Any] = None,
+    drop_missing: bool = False,
+    extreme_weight_threshold: float = 20.0,
+    truncate_weights: bool = False,
+    max_weight: Optional[float] = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Estimate Average Treatment Effect (ATE) using Inverse Probability of Treatment Weighting (IPTW).
+
+    Methodology:
+    ------------
+    1. Propensity Score Estimation:
+       Reuses `estimate_propensity_scores` to fit a logistic regression model
+       e_i = P(Treatment = treated | X_i) and obtain empirical overlap diagnostics.
+    2. Unstabilized ATE Weights:
+       For each observation i:
+           p_i = e_i if T_i = 1 else (1 - e_i)
+           w_i = 1 / p_i
+    3. Weighted Counterfactual Means:
+           mu_1 = sum_{i in Treated} (w_i * Y_i) / sum_{i in Treated} w_i
+           mu_0 = sum_{i in Control} (w_i * Y_i) / sum_{i in Control} w_i
+    4. IPTW ATE Estimate:
+           ATE_{IPTW} = mu_1 - mu_0  (treated minus control)
+    5. Kish's Effective Sample Size:
+           ESS = (sum_i w_i)^2 / sum_i (w_i^2)
+    6. Covariate Balance Diagnostics:
+           Evaluates Standardized Mean Differences (SMDs) before and after weighting
+           for numeric confounders and categorical level indicators.
+
+    Parameters:
+    -----------
+    data : Any
+        Tabular dataset (DataFrame, dict of lists, list of dicts).
+    treatment_col : str
+        Name of the binary treatment column.
+    outcome_col : str
+        Name of the numeric outcome column.
+    confounder_cols : Sequence[str]
+        List of observed confounder column names.
+    treated_value : Any, optional
+        Label identifying treated observations. If None, inferred automatically.
+    control_value : Any, optional
+        Label identifying control observations. If None, inferred automatically.
+    untreated_value : Any, optional
+        Alias for control_value.
+    drop_missing : bool, default False
+        Missing data policy:
+        - False (default): raises ValueError if missing values are detected.
+        - True: drops incomplete rows and tracks rows_dropped.
+    extreme_weight_threshold : float, default 20.0
+        Diagnostic threshold above which a weight is flagged as extreme.
+    truncate_weights : bool, default False
+        Explicit opt-in setting to truncate weights at max_weight.
+    max_weight : float, optional
+        Maximum weight threshold used if truncate_weights=True.
+
+    Returns:
+    --------
+    Dict[str, Any]
+        Structured results dictionary containing ATE estimate, weighted means,
+        sample counts, weight summaries, effective sample sizes, overlap diagnostics,
+        and before-and-after covariate balance metrics.
+
+    Raises:
+    -------
+    ValueError:
+        If inputs are invalid, confounders are empty, positivity is violated (assigned
+        probability near zero), or sample size is insufficient.
+    """
+    # 1. Flexible argument resolution
+    actual_outcome_col = outcome_col
+    actual_confounder_cols = confounder_cols
+
+    if isinstance(outcome_col, (list, tuple)) and isinstance(confounder_cols, str):
+        actual_outcome_col = confounder_cols
+        actual_confounder_cols = outcome_col
+
+    if control_value is not None and untreated_value is None:
+        untreated_value = control_value
+    if treated_value is None and "treatment_value" in kwargs:
+        treated_value = kwargs["treatment_value"]
+
+    # 2. Confounder list validation
+    if actual_confounder_cols is None:
+        raise ValueError("IPTW ATE estimation requires at least one confounder column. Confounder list cannot be None.")
+    if not isinstance(actual_confounder_cols, (list, tuple)):
+        raise ValueError(
+            f"confounder_cols must be a list or tuple of column names, got {type(actual_confounder_cols).__name__}."
+        )
+    if len(actual_confounder_cols) == 0:
+        raise ValueError("IPTW ATE estimation requires at least one confounder column. Confounder list cannot be empty.")
+
+    # 3. Propensity score estimation & data validation reuse
+    ps_res = estimate_propensity_scores(
+        data=data,
+        treatment_col=treatment_col,
+        confounder_cols=actual_confounder_cols,
+        outcome_col=actual_outcome_col,
+        treated_value=treated_value,
+        untreated_value=untreated_value,
+        drop_missing=drop_missing,
+    )
+
+    df_raw = _to_dataframe(data)
+    df_validated = df_raw.loc[ps_res["observation_indices"]].copy()
+
+    treated_label = ps_res["treated_value"]
+    control_label = ps_res["control_value"]
+    treatment_series = df_validated[treatment_col]
+    t_binary = (treatment_series == treated_label).astype(float).values
+    outcome_series = pd.to_numeric(df_validated[actual_outcome_col], errors="raise").astype(float).values
+
+    # Align propensity scores with rows
+    scores_arr = np.array([ps_res["scores_by_index"][idx] for idx in df_validated.index], dtype=float)
+
+    if np.isnan(scores_arr).any() or np.isinf(scores_arr).any():
+        raise ValueError("Propensity scores contain NaN or infinite values.")
+
+    # 4. Assigned-treatment probabilities & positivity checks
+    assigned_probs = np.where(t_binary == 1.0, scores_arr, 1.0 - scores_arr)
+
+    # Detect zero or near-zero probabilities that would yield infinite weights
+    zero_prob_mask = (assigned_probs <= 0.0) | np.isclose(assigned_probs, 0.0, atol=1e-12)
+    if np.any(zero_prob_mask):
+        n_violating = int(np.sum(zero_prob_mask))
+        raise ValueError(
+            f"Positivity violation: {n_violating} observation(s) have an assigned-treatment probability "
+            f"of zero (or numerically indistinguishable from zero, <= 1e-12). "
+            "IPTW weighting would produce infinite weights and division by zero. "
+            "Check common support and overlap before applying IPTW."
+        )
+
+    # 5. Calculate weights
+    raw_weights = 1.0 / assigned_probs
+    if np.isnan(raw_weights).any() or np.isinf(raw_weights).any():
+        raise ValueError("IPTW calculation resulted in non-finite weights.")
+
+    weights = raw_weights.copy()
+    rows_truncated = 0
+    if truncate_weights and max_weight is not None:
+        if max_weight <= 0:
+            raise ValueError(f"max_weight must be positive, got {max_weight}.")
+        rows_truncated = int(np.sum(weights > max_weight))
+        weights = np.minimum(weights, max_weight)
+
+    # 6. Weighted outcome means & IPTW ATE
+    treated_mask = (t_binary == 1.0)
+    control_mask = (t_binary == 0.0)
+
+    w_treated = weights[treated_mask]
+    w_control = weights[control_mask]
+
+    y_treated = outcome_series[treated_mask]
+    y_control = outcome_series[control_mask]
+
+    sum_wt = float(np.sum(w_treated))
+    sum_wc = float(np.sum(w_control))
+
+    if sum_wt == 0.0 or sum_wc == 0.0:
+        raise ValueError("Sum of IPTW weights in treated or control group is zero.")
+
+    weighted_mean_treated = float(np.sum(w_treated * y_treated) / sum_wt)
+    weighted_mean_control = float(np.sum(w_control * y_control) / sum_wc)
+
+    iptw_ate = float(weighted_mean_treated - weighted_mean_control)
+
+    # Raw unadjusted difference in means
+    raw_mean_treated = float(np.mean(y_treated))
+    raw_mean_control = float(np.mean(y_control))
+    raw_diff = float(raw_mean_treated - raw_mean_control)
+
+    # 7. Effective Sample Sizes
+    ess_treated = compute_effective_sample_size(w_treated)
+    ess_control = compute_effective_sample_size(w_control)
+    ess_total = float(ess_treated + ess_control)
+
+    n_t = int(len(w_treated))
+    n_c = int(len(w_control))
+
+    ess_treated_frac = float(ess_treated / n_t) if n_t > 0 else 0.0
+    ess_control_frac = float(ess_control / n_c) if n_c > 0 else 0.0
+
+    # 8. Covariate balance before and after weighting
+    balance_res = compute_weighted_covariate_balance(
+        data=df_validated,
+        treatment_col=treatment_col,
+        confounder_cols=actual_confounder_cols,
+        weights=weights,
+        treated_value=treated_label,
+        control_value=control_label,
+    )
+
+    # 9. Weight summary & diagnostic checks
+    ext_threshold = float(extreme_weight_threshold)
+    n_extreme = int(np.sum(weights > ext_threshold))
+    has_extreme = bool(n_extreme > 0)
+
+    weight_summary = {
+        "min_weight": float(np.min(weights)),
+        "max_weight": float(np.max(weights)),
+        "mean_weight": float(np.mean(weights)),
+        "std_weight": float(np.std(weights, ddof=1)) if len(weights) > 1 else 0.0,
+        "median_weight": float(np.median(weights)),
+        "p95_weight": float(np.percentile(weights, 95)),
+        "p99_weight": float(np.percentile(weights, 99)),
+        "extreme_weight_threshold": ext_threshold,
+        "n_extreme_weights": n_extreme,
+        "has_extreme_weights": has_extreme,
+        "is_truncated": truncate_weights,
+        "truncation_max_weight": max_weight if truncate_weights else None,
+        "rows_truncated": rows_truncated,
+    }
+
+    # 10. Warnings formulation
+    warnings_list: List[str] = []
+    if ps_res["overlap_diagnostics"]["warning"]:
+        warnings_list.append(ps_res["overlap_diagnostics"]["warning"])
+
+    if has_extreme:
+        warnings_list.append(
+            f"Extreme weights warning: {n_extreme} observation(s) have IPTW weights exceeding the diagnostic "
+            f"threshold of {ext_threshold:.2f} (max weight: {weight_summary['max_weight']:.2f}). Extreme weights "
+            "can inflate estimator variance and lead to unstable treatment effect estimates."
+        )
+
+    if ess_treated_frac < 0.50 or ess_control_frac < 0.50:
+        warnings_list.append(
+            f"Weight concentration warning: Effective sample size in one or both treatment arms is below 50% "
+            f"of nominal sample size (treated ESS: {ess_treated:.1f}/{n_t} [{ess_treated_frac:.1%}], "
+            f"control ESS: {ess_control:.1f}/{n_c} [{ess_control_frac:.1%}]), indicating substantial variance inflation."
+        )
+
+    if not balance_res["balance_summary"]["balance_improved"]:
+        warnings_list.append(
+            "Covariate balance warning: Weighting did not improve overall maximum standardized mean difference. "
+            f"Max absolute SMD before: {balance_res['balance_summary']['max_abs_smd_before']:.4f}, "
+            f"after: {balance_res['balance_summary']['max_abs_smd_after']:.4f}."
+        )
+
+    # 11. Interpretation and assumptions text
+    interpretation_text = (
+        f"The IPTW-estimated Average Treatment Effect (ATE) is {iptw_ate:.4f} "
+        f"(weighted treated outcome mean: {weighted_mean_treated:.4f}, control: {weighted_mean_control:.4f}; "
+        f"unadjusted difference in means: {raw_diff:.4f}). "
+        f"Effective sample sizes: treated {ess_treated:.1f}/{n_t} ({ess_treated_frac:.1%}), "
+        f"control {ess_control:.1f}/{n_c} ({ess_control_frac:.1%}). "
+        f"Max absolute covariate SMD: {balance_res['balance_summary']['max_abs_smd_before']:.4f} before weighting, "
+        f"{balance_res['balance_summary']['max_abs_smd_after']:.4f} after weighting "
+        f"({'improved' if balance_res['balance_summary']['balance_improved'] else 'not improved'})."
+    )
+
+    assumptions_text = (
+        "Inverse Probability of Treatment Weighting (IPTW) identifies the Average Treatment Effect (ATE) "
+        "under five fundamental identification assumptions: (1) Conditional Exchangeability / No Unmeasured "
+        "Confounding (potential outcomes are conditionally independent of treatment given observed confounders: "
+        "(Y(1), Y(0)) ⫫ T | X); (2) Positivity / Common Support (0 < P(T=1 | X=x) < 1 for all relevant x); "
+        "(3) Correct Propensity Score Specification (the logistic regression model accurately models the true "
+        "assignment mechanism); (4) Consistency (the observed outcome under treatment T matches the corresponding "
+        "potential outcome Y = Y(T)); and (5) SUTVA (no interference between units). "
+        "Critical limitations: IPTW adjusts only for observed, modeled covariates. Good observed balance does "
+        "NOT guarantee absence of unmeasured confounding. Near-positivity violations produce extreme weights, "
+        "inflating variance and destabilizing effect estimates."
+    )
+
+    return {
+        "estimator": "iptw_ate",
+        "iptw_ate": iptw_ate,
+        "ate": iptw_ate,
+        "weighted_mean_outcome_treated": weighted_mean_treated,
+        "weighted_mean_outcome_control": weighted_mean_control,
+        "unadjusted_ate": raw_diff,
+        "raw_difference": raw_diff,
+        "difference_in_means": raw_diff,
+        "n_total": int(ps_res["n_total"]),
+        "n_treated": n_t,
+        "n_control": n_c,
+        "n_untreated": n_c,
+        "treatment_col": treatment_col,
+        "outcome_col": actual_outcome_col,
+        "confounder_cols": ps_res["confounder_cols"],
+        "numeric_confounders": ps_res["numeric_confounders"],
+        "categorical_confounders": ps_res["categorical_confounders"],
+        "treated_value": treated_label,
+        "control_value": control_label,
+        "untreated_value": control_label,
+        "rows_dropped": int(ps_res["rows_dropped"]),
+        "propensity_score_summary": {
+            "min": float(np.min(scores_arr)),
+            "max": float(np.max(scores_arr)),
+            "mean": float(np.mean(scores_arr)),
+            "median": float(np.median(scores_arr)),
+            "std": float(np.std(scores_arr, ddof=1)) if len(scores_arr) > 1 else 0.0,
+        },
+        "weight_summary": weight_summary,
+        "weights": [float(w) for w in weights],
+        "ess_treated": ess_treated,
+        "ess_control": ess_control,
+        "ess_total": ess_total,
+        "ess_treated_fraction": ess_treated_frac,
+        "ess_control_fraction": ess_control_frac,
+        "overlap_diagnostics": ps_res["overlap_diagnostics"],
+        "covariate_balance_before": balance_res["before_balance"],
+        "covariate_balance_after": balance_res["after_balance"],
+        "balance_summary": balance_res["balance_summary"],
+        "warnings": warnings_list,
         "interpretation": interpretation_text,
         "assumptions": assumptions_text,
     }

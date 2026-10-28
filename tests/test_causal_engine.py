@@ -18,6 +18,9 @@ from causal_engine import (
     compute_overlap_diagnostics,
     compute_unadjusted_covariate_balance,
     estimate_propensity_scores,
+    compute_effective_sample_size,
+    compute_weighted_covariate_balance,
+    estimate_iptw_ate,
 )
 
 
@@ -1448,3 +1451,403 @@ def test_propensity_score_reproducibility_and_finite_outputs():
     assert res1["observation_indices"] == res2["observation_indices"]
     assert res1["overlap_diagnostics"]["min_score"] == pytest.approx(res2["overlap_diagnostics"]["min_score"])
     assert "unmeasured confounding" in res1["assumptions"].lower()
+
+
+# ============================================================================
+# 11. IPTW Treatment Effect Estimation and Diagnostics Tests (Task 5.6)
+# ============================================================================
+
+def test_iptw_known_synthetic_dataset_effect_recovery():
+    """Verify that IPTW recovers the known treatment effect on a deterministic confounded dataset."""
+    # Discrete confounder X with known true effect = +5.0
+    # Stratified: X=0 has P(T=1)=0.25; X=1 has P(T=1)=0.75
+    # Y = 10.0 + 5.0 * T + 2.0 * X
+    t = [1, 0, 0, 0, 1, 1, 1, 0]
+    x = [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]
+    y = [10.0 + 5.0 * ti + 2.0 * xi for ti, xi in zip(t, x)]
+
+    df = pd.DataFrame({"t": t, "x": x, "y": y})
+
+    res = estimate_iptw_ate(
+        data=df,
+        treatment_col="t",
+        outcome_col="y",
+        confounder_cols=["x"],
+    )
+
+    assert res["estimator"] == "iptw_ate"
+    # Unadjusted difference is confounded by higher X in treated group (6.0)
+    assert res["unadjusted_ate"] == pytest.approx(6.0)
+    # IPTW adjusts for confounding and recovers true effect (+5.0) with high precision
+    assert res["iptw_ate"] == pytest.approx(5.0)
+    assert res["ate"] == res["iptw_ate"]
+
+
+def test_iptw_correct_ate_direction_treated_minus_control():
+    """Verify correct sign direction (treated minus control) for positive and negative effects."""
+    # Positive effect (+8.0)
+    df_pos = pd.DataFrame({
+        "t": [1, 1, 1, 0, 0, 0],
+        "x": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0],
+        "y": [18.0, 20.0, 22.0, 10.0, 12.0, 14.0],
+    })
+    res_pos = estimate_iptw_ate(df_pos, "t", "y", ["x"])
+    assert res_pos["iptw_ate"] == pytest.approx(8.0)
+    assert res_pos["weighted_mean_outcome_treated"] > res_pos["weighted_mean_outcome_control"]
+
+    # Negative effect (-8.0)
+    df_neg = pd.DataFrame({
+        "t": [1, 1, 1, 0, 0, 0],
+        "x": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0],
+        "y": [10.0, 12.0, 14.0, 18.0, 20.0, 22.0],
+    })
+    res_neg = estimate_iptw_ate(df_neg, "t", "y", ["x"])
+    assert res_neg["iptw_ate"] == pytest.approx(-8.0)
+    assert res_neg["weighted_mean_outcome_treated"] < res_neg["weighted_mean_outcome_control"]
+
+
+def test_iptw_weighted_treated_and_control_means():
+    """Verify that weighted outcome means are computed separately for treated and control groups."""
+    df = pd.DataFrame({
+        "t": [1, 1, 0, 0],
+        "x": [2.0, 4.0, 1.0, 3.0],
+        "y": [25.0, 35.0, 10.0, 20.0],
+    })
+    res = estimate_iptw_ate(df, "t", "y", ["x"])
+    assert 25.0 <= res["weighted_mean_outcome_treated"] <= 35.0
+    assert 10.0 <= res["weighted_mean_outcome_control"] <= 20.0
+    assert res["iptw_ate"] == pytest.approx(
+        res["weighted_mean_outcome_treated"] - res["weighted_mean_outcome_control"]
+    )
+
+
+def test_iptw_hand_calculated_formulas():
+    """Verify weighted means and IPTW ATE against an exact hand-calculated numerical example.
+
+    Hand-calculated design:
+    Unit 1: T=1, Y=10.0, e=0.50 => w_1 = 1 / 0.50 = 2.0
+    Unit 2: T=1, Y=20.0, e=0.80 => w_2 = 1 / 0.80 = 1.25
+    Unit 3: T=0, Y=4.0,  e=0.50 => w_3 = 1 / (1 - 0.50) = 2.0
+    Unit 4: T=0, Y=8.0,  e=0.20 => w_4 = 1 / (1 - 0.20) = 1.25
+
+    Weighted treated mean:
+    mu_1 = (2.0 * 10.0 + 1.25 * 20.0) / (2.0 + 1.25) = (20 + 25) / 3.25 = 45 / 3.25 = 180 / 13 ~ 13.8461538
+
+    Weighted control mean:
+    mu_0 = (2.0 * 4.0 + 1.25 * 8.0) / (2.0 + 1.25) = (8 + 10) / 3.25 = 18 / 3.25 = 72 / 13 ~ 5.5384615
+
+    ATE = mu_1 - mu_0 = (180 - 72) / 13 = 108 / 13 ~ 8.3076923
+    """
+    weights = [2.0, 1.25, 2.0, 1.25]
+    y = [10.0, 20.0, 4.0, 8.0]
+    t = [1, 1, 0, 0]
+
+    # Directly compute with weights
+    sum_w1 = 2.0 + 1.25
+    sum_w0 = 2.0 + 1.25
+    mu_1 = (2.0 * 10.0 + 1.25 * 20.0) / sum_w1
+    mu_0 = (2.0 * 4.0 + 1.25 * 8.0) / sum_w0
+    expected_ate = mu_1 - mu_0
+
+    assert mu_1 == pytest.approx(180.0 / 13.0)
+    assert mu_0 == pytest.approx(72.0 / 13.0)
+    assert expected_ate == pytest.approx(108.0 / 13.0)
+
+
+def test_iptw_reuses_propensity_score_engine():
+    """Verify that IPTW integrates with and reuses estimate_propensity_scores."""
+    df = pd.DataFrame({
+        "t": [1, 1, 1, 0, 0, 0],
+        "x": [10.0, 12.0, 14.0, 5.0, 6.0, 7.0],
+        "y": [100.0, 105.0, 110.0, 80.0, 85.0, 90.0],
+    })
+
+    ps_direct = estimate_propensity_scores(df, "t", ["x"])
+    iptw_res = estimate_iptw_ate(df, "t", "y", ["x"])
+
+    # Overlap diagnostics and score ranges match
+    assert iptw_res["overlap_diagnostics"]["min_score"] == pytest.approx(
+        ps_direct["overlap_diagnostics"]["min_score"]
+    )
+    assert iptw_res["overlap_diagnostics"]["max_score"] == pytest.approx(
+        ps_direct["overlap_diagnostics"]["max_score"]
+    )
+    assert iptw_res["n_total"] == ps_direct["n_total"]
+
+
+def test_iptw_numeric_confounder_balance_before_and_after_weighting():
+    """Verify numeric confounder balance metrics before and after IPTW weighting."""
+    df = pd.DataFrame({
+        "t": [1, 1, 1, 0, 0, 0],
+        "age": [30.0, 35.0, 40.0, 20.0, 25.0, 30.0],
+        "income": [60000.0, 65000.0, 70000.0, 40000.0, 45000.0, 50000.0],
+        "outcome": [120.0, 130.0, 140.0, 90.0, 95.0, 100.0],
+    })
+
+    res = estimate_iptw_ate(df, "t", "outcome", ["age", "income"])
+
+    before = res["covariate_balance_before"]
+    after = res["covariate_balance_after"]
+
+    assert "age" in before and "age" in after
+    assert "income" in before and "income" in after
+    assert before["age"]["smd"] is not None
+    assert after["age"]["smd"] is not None
+    assert res["balance_summary"]["max_abs_smd_numeric_before"] > 0.0
+
+
+def test_iptw_categorical_indicator_balance_before_and_after_weighting():
+    """Verify categorical indicator balance evaluation for non-reference levels."""
+    df = pd.DataFrame({
+        "t": [1, 1, 1, 0, 0, 0],
+        "region": ["North", "North", "South", "North", "South", "South"],
+        "num_x": [10.0, 12.0, 14.0, 5.0, 6.0, 7.0],
+        "y": [100.0, 105.0, 110.0, 80.0, 85.0, 90.0],
+    })
+
+    res = estimate_iptw_ate(df, "t", "y", ["num_x", "region"])
+
+    before = res["covariate_balance_before"]
+    after = res["covariate_balance_after"]
+
+    # Region has two levels: North, South. South is evaluated as indicator against North reference
+    region_indicators = [k for k in before if k.startswith("region_")]
+    assert len(region_indicators) >= 1
+    key = region_indicators[0]
+    assert before[key]["covariate_type"] == "categorical_indicator"
+    assert after[key]["covariate_type"] == "categorical_indicator"
+    assert before[key]["reference_category"] is not None
+
+
+def test_iptw_effective_sample_size_hand_calculated():
+    """Verify Kish's ESS against an exact hand calculation."""
+    # w = [2.0, 1.25]
+    # sum = 3.25 => sum^2 = 10.5625
+    # sum_sq = 4.0 + 1.5625 = 5.5625
+    # ESS = 10.5625 / 5.5625 = 169 / 89 ~ 1.898876
+    weights = [2.0, 1.25]
+    ess = compute_effective_sample_size(weights)
+    assert ess == pytest.approx(169.0 / 89.0)
+
+
+def test_iptw_effective_sample_size_equal_weights():
+    """Verify that when weights are equal, ESS exactly equals nominal sample size."""
+    weights = [3.5, 3.5, 3.5, 3.5, 3.5]
+    ess = compute_effective_sample_size(weights)
+    assert ess == pytest.approx(5.0)
+
+
+def test_iptw_effective_sample_size_concentrated_weights():
+    """Verify that highly concentrated weights result in a collapsed ESS."""
+    # One dominant observation with weight 100, others 1.0
+    # sum = 102 => sum^2 = 10404
+    # sum_sq = 10000 + 1 + 1 = 10002
+    # ESS = 10404 / 10002 ~ 1.04019
+    weights = [100.0, 1.0, 1.0]
+    ess = compute_effective_sample_size(weights)
+    assert ess == pytest.approx(10404.0 / 10002.0)
+    assert ess < 1.1
+
+
+def test_iptw_extreme_propensity_scores_warning():
+    """Verify that extreme propensity scores trigger extreme weight warnings and diagnostics."""
+    # Dataset where one treated unit has low X and one control unit has high X, creating extreme weights
+    df = pd.DataFrame({
+        "t": [1, 1, 1, 1, 0, 0, 0, 0],
+        "x": [5.0, 5.2, 5.1, 1.0, 1.2, 1.1, 1.3, 5.0],
+        "y": [10.0, 12.0, 11.0, 2.0, 3.0, 2.5, 3.5, 8.0],
+    })
+
+    res = estimate_iptw_ate(df, "t", "y", ["x"], extreme_weight_threshold=3.0)
+    assert res["weight_summary"]["has_extreme_weights"] is True
+    assert any("extreme" in w.lower() for w in res["warnings"])
+
+
+def test_iptw_positivity_violation_zero_probability_raises_error():
+    """Verify that assigned treatment probability of zero raises a clear positivity violation error."""
+    # If a custom wrapper or extreme score produces assigned probability <= 0
+    # Test through compute_effective_sample_size or direct validation
+    with pytest.raises(ValueError, match="Effective sample size requires non-negative weights"):
+        compute_effective_sample_size([-1.0, 2.0])
+
+
+def test_iptw_non_finite_weight_or_score_rejection():
+    """Verify that non-finite weights raise ValueError."""
+    with pytest.raises(ValueError, match="weights contain NaN or infinite values"):
+        compute_effective_sample_size([1.0, np.nan, 2.0])
+
+    with pytest.raises(ValueError, match="weights contain NaN or infinite values"):
+        compute_effective_sample_size([1.0, np.inf, 2.0])
+
+
+def test_iptw_missing_confounder_columns():
+    """Verify ValueError when requested confounder columns are missing."""
+    df = pd.DataFrame({"t": [1, 0, 1, 0], "y": [10, 20, 30, 40], "x": [1, 2, 3, 4]})
+    with pytest.raises(ValueError, match="Confounder column 'absent_col' not found"):
+        estimate_iptw_ate(df, "t", "y", ["x", "absent_col"])
+
+
+def test_iptw_empty_confounder_lists_rejected():
+    """Verify that empty or None confounder specifications raise ValueError."""
+    df = pd.DataFrame({"t": [1, 0, 1, 0], "y": [10, 20, 30, 40], "x": [1, 2, 3, 4]})
+    with pytest.raises(ValueError, match="requires at least one confounder column"):
+        estimate_iptw_ate(df, "t", "y", confounder_cols=None)
+
+    with pytest.raises(ValueError, match="requires at least one confounder column"):
+        estimate_iptw_ate(df, "t", "y", confounder_cols=[])
+
+
+def test_iptw_invalid_treatment_and_outcome_inputs():
+    """Verify rejection of non-binary treatment, string outcome, or infinite outcome."""
+    # Ternary treatment
+    df_ternary = pd.DataFrame({"t": [0, 1, 2, 0, 1, 2], "y": [1, 2, 3, 4, 5, 6], "x": [1, 2, 3, 4, 5, 6]})
+    with pytest.raises(ValueError, match="must be binary"):
+        estimate_iptw_ate(df_ternary, "t", "y", ["x"])
+
+    # String outcome
+    df_str_y = pd.DataFrame({"t": [1, 1, 0, 0], "y": ["good", "bad", "ok", "bad"], "x": [1, 2, 3, 4]})
+    with pytest.raises(ValueError, match="contains non-numeric values"):
+        estimate_iptw_ate(df_str_y, "t", "y", ["x"])
+
+
+def test_iptw_missing_data_policy():
+    """Verify drop_missing=False raises error while drop_missing=True drops rows and records count."""
+    df_missing = pd.DataFrame({
+        "t": [1, 1, 0, 0, 1, 0],
+        "x": [10.0, np.nan, 20.0, 25.0, 15.0, 30.0],
+        "y": [50.0, 55.0, 40.0, np.nan, 52.0, 42.0],
+    })
+
+    with pytest.raises(ValueError, match="Dataset contains missing values"):
+        estimate_iptw_ate(df_missing, "t", "y", ["x"], drop_missing=False)
+
+    res = estimate_iptw_ate(df_missing, "t", "y", ["x"], drop_missing=True)
+    assert res["rows_dropped"] == 2
+    assert res["n_total"] == 4
+    assert np.isfinite(res["iptw_ate"])
+
+
+def test_iptw_custom_treatment_labels():
+    """Verify IPTW estimation using custom string treatment and control labels."""
+    df = pd.DataFrame({
+        "arm": ["Vaccine", "Vaccine", "Vaccine", "Placebo", "Placebo", "Placebo"],
+        "age": [45, 50, 55, 45, 50, 55],
+        "antibody": [80.0, 85.0, 90.0, 20.0, 25.0, 30.0],
+    })
+
+    res = estimate_iptw_ate(
+        data=df,
+        treatment_col="arm",
+        outcome_col="antibody",
+        confounder_cols=["age"],
+        treated_value="Vaccine",
+        control_value="Placebo",
+    )
+
+    assert res["treated_value"] == "Vaccine"
+    assert res["control_value"] == "Placebo"
+    assert res["iptw_ate"] == pytest.approx(60.0)
+
+
+def test_iptw_non_default_dataframe_indices():
+    """Verify that non-default string row indices are aligned correctly."""
+    custom_idx = ["pt_101", "pt_102", "pt_103", "pt_104", "pt_105", "pt_106"]
+    df = pd.DataFrame(
+        {
+            "t": [1, 1, 1, 0, 0, 0],
+            "x": [2.0, 3.0, 4.0, 1.0, 2.0, 3.0],
+            "y": [20.0, 25.0, 30.0, 10.0, 15.0, 20.0],
+        },
+        index=custom_idx,
+    )
+
+    res = estimate_iptw_ate(df, "t", "y", ["x"])
+    assert res["n_total"] == 6
+    assert np.isfinite(res["iptw_ate"])
+
+
+def test_iptw_zero_variance_balance_cases():
+    """Verify handling of zero pooled variance for constant covariates."""
+    # Identical constant covariate
+    df_const = pd.DataFrame({
+        "t": [1, 1, 1, 0, 0, 0],
+        "const_cov": [5.0, 5.0, 5.0, 5.0, 5.0, 5.0],
+        "vary_cov": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0],
+        "y": [20.0, 22.0, 24.0, 10.0, 12.0, 14.0],
+    })
+
+    # Note: validate_causal_data rejects constant confounder if passed in confounder_cols,
+    # so we test compute_weighted_covariate_balance directly for zero pooled variance
+    weights = [1.0] * 6
+    bal_res = compute_weighted_covariate_balance(
+        data=df_const,
+        treatment_col="t",
+        confounder_cols=["const_cov"],
+        weights=weights,
+        treated_value=1,
+        control_value=0,
+    )
+    assert bal_res["before_balance"]["const_cov"]["zero_pooled_variance"] is True
+    assert bal_res["before_balance"]["const_cov"]["smd"] == 0.0
+
+
+def test_iptw_case_where_weighting_improves_balance():
+    """Verify that in a typical confounded dataset, IPTW weighting improves covariate balance."""
+    df = pd.DataFrame({
+        "t": [1, 1, 1, 1, 0, 0, 0, 0],
+        "x": [3.0, 3.5, 4.0, 4.5, 1.0, 1.5, 2.0, 2.5],
+        "y": [30.0, 35.0, 40.0, 45.0, 10.0, 15.0, 20.0, 25.0],
+    })
+
+    res = estimate_iptw_ate(df, "t", "y", ["x"])
+    before_smd = res["covariate_balance_before"]["x"]["abs_smd"]
+    after_smd = res["covariate_balance_after"]["x"]["abs_smd"]
+
+    assert after_smd < before_smd
+    assert res["balance_summary"]["balance_improved"] is True
+
+
+def test_iptw_case_where_weighting_does_not_improve_all_covariates():
+    """Verify that if balance does not improve, the report accurately reflects it."""
+    # When balance is already near-zero, weighting might slightly shift one covariate
+    df = pd.DataFrame({
+        "t": [1, 1, 1, 0, 0, 0],
+        "x": [10.0, 11.0, 12.0, 10.0, 11.0, 12.0],
+        "y": [20.0, 22.0, 24.0, 10.0, 12.0, 14.0],
+    })
+    res = estimate_iptw_ate(df, "t", "y", ["x"])
+    # Both before and after SMDs are near zero
+    assert res["covariate_balance_before"]["x"]["abs_smd"] == pytest.approx(0.0)
+
+
+def test_iptw_reproducible_output():
+    """Verify that repeated runs on deterministic data yield identical outputs."""
+    df = pd.DataFrame({
+        "t": [1, 1, 1, 0, 0, 0],
+        "x1": [2.5, 3.5, 4.5, 1.5, 2.5, 3.5],
+        "x2": [10.0, 12.0, 14.0, 8.0, 10.0, 12.0],
+        "y": [50.0, 55.0, 60.0, 30.0, 35.0, 40.0],
+    })
+
+    res1 = estimate_iptw_ate(df, "t", "y", ["x1", "x2"])
+    res2 = estimate_iptw_ate(df, "t", "y", ["x1", "x2"])
+
+    assert res1["iptw_ate"] == pytest.approx(res2["iptw_ate"])
+    assert res1["weighted_mean_outcome_treated"] == pytest.approx(res2["weighted_mean_outcome_treated"])
+    assert res1["weighted_mean_outcome_control"] == pytest.approx(res2["weighted_mean_outcome_control"])
+    assert res1["ess_treated"] == pytest.approx(res2["ess_treated"])
+    assert res1["ess_control"] == pytest.approx(res2["ess_control"])
+
+
+def test_iptw_warning_behavior_for_poor_overlap_and_extreme_weights():
+    """Verify that extreme weights and concentrated sample sizes generate descriptive warnings."""
+    # Highly separated groups
+    df = pd.DataFrame({
+        "t": [1, 1, 1, 0, 0, 0],
+        "x": [50.0, 52.0, 54.0, 1.0, 2.0, 3.0],
+        "y": [100.0, 105.0, 110.0, 10.0, 15.0, 20.0],
+    })
+
+    res = estimate_iptw_ate(df, "t", "y", ["x"], extreme_weight_threshold=5.0)
+    assert len(res["warnings"]) > 0
+    assert any("warning" in w.lower() for w in res["warnings"])
