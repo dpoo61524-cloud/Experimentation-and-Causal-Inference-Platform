@@ -1,5 +1,6 @@
 """Automated tests for FastAPI endpoints in the Experimentation Platform."""
 
+import math
 from pathlib import Path
 import sys
 import pytest
@@ -1867,6 +1868,356 @@ def test_causal_all_endpoints_coexist(
     res3 = client.post("/api/causal/propensity-scores", json=example_propensity_payload)
     assert res3.status_code == 200
     assert res3.json()["estimator"] == "logistic_propensity_score"
+
+
+# --- Causal Inference: IPTW ATE Endpoint Tests ---
+
+@pytest.fixture
+def example_iptw_payload():
+    """Deterministic payload with numeric outcome, binary treatment, and overlapping confounders."""
+    data = [
+        {"treatment": 1, "outcome": 10.0, "x": 1.0, "z": 20.0},
+        {"treatment": 1, "outcome": 12.0, "x": 2.0, "z": 25.0},
+        {"treatment": 1, "outcome": 14.0, "x": 3.0, "z": 30.0},
+        {"treatment": 1, "outcome": 16.0, "x": 4.0, "z": 35.0},
+        {"treatment": 0, "outcome": 5.0,  "x": 1.0, "z": 22.0},
+        {"treatment": 0, "outcome": 7.0,  "x": 2.0, "z": 24.0},
+        {"treatment": 0, "outcome": 9.0,  "x": 3.0, "z": 28.0},
+        {"treatment": 0, "outcome": 11.0, "x": 4.0, "z": 32.0},
+    ]
+    return {
+        "data": data,
+        "treatment_col": "treatment",
+        "outcome_col": "outcome",
+        "confounder_cols": ["x", "z"],
+        "treated_value": 1,
+        "untreated_value": 0,
+        "drop_missing": False,
+        "extreme_weight_threshold": 20.0,
+        "truncate_weights": False,
+        "max_weight": None,
+    }
+
+
+def test_iptw_ate_success(example_iptw_payload):
+    """Verify HTTP 200, schema structure, point estimate, weighted means, effective sample sizes, and balance."""
+    response = client.post("/api/causal/iptw-ate", json=example_iptw_payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    # Estimator metadata & sample counts
+    assert data["estimator"] == "iptw_ate"
+    assert data["n_total"] == 8
+    assert data["n_treated"] == 4
+    assert data["n_control"] == 4
+    assert data["treatment_col"] == "treatment"
+    assert data["outcome_col"] == "outcome"
+    assert data["confounder_cols"] == ["x", "z"]
+    assert data["treated_value"] == 1
+    assert data["control_value"] == 0
+    assert data["rows_dropped"] == 0
+
+    # ATE & weighted means
+    assert math.isfinite(data["iptw_ate"])
+    assert data["ate"] == data["iptw_ate"]
+    assert data["weighted_mean_outcome_treated"] > data["weighted_mean_outcome_control"]
+    assert data["iptw_ate"] == pytest.approx(
+        data["weighted_mean_outcome_treated"] - data["weighted_mean_outcome_control"],
+        abs=1e-6,
+    )
+    assert data["weighted_mean_treated"] == pytest.approx(data["weighted_mean_outcome_treated"])
+    assert data["weighted_mean_control"] == pytest.approx(data["weighted_mean_outcome_control"])
+    assert data["unadjusted_ate"] == pytest.approx(5.0)
+
+    # Effective sample sizes
+    assert data["ess_treated"] > 0
+    assert data["ess_control"] > 0
+    assert data["ess_total"] == pytest.approx(data["ess_treated"] + data["ess_control"], abs=1e-6)
+    assert data["effective_sample_size_treated"] == data["ess_treated"]
+    assert 0.0 < data["ess_treated_fraction"] <= 1.0
+    assert 0.0 < data["ess_control_fraction"] <= 1.0
+
+    # Weights and summaries
+    assert len(data["weights"]) == 8
+    assert all(w > 0 for w in data["weights"])
+    ws = data["weight_summary"]
+    assert ws["min_weight"] <= ws["max_weight"]
+    assert ws["is_truncated"] is False
+    assert ws["rows_truncated"] == 0
+
+    # Diagnostics
+    assert "propensity_score_summary" in data
+    assert "overlap_diagnostics" in data
+    assert "covariate_balance_before" in data
+    assert "covariate_balance_after" in data
+    assert "balance_summary" in data
+    assert "interpretation" in data
+    assert "assumptions" in data
+    assert "traceback" not in response.text.lower()
+
+
+def test_iptw_ate_custom_labels_and_string_treatment():
+    """Verify IPTW endpoint with string treatment labels and categorical/continuous confounders."""
+    data = [
+        {"arm": "drug", "bp_drop": 18.0, "age": 45, "tier": "low"},
+        {"arm": "drug", "bp_drop": 22.0, "age": 52, "tier": "high"},
+        {"arm": "drug", "bp_drop": 20.0, "age": 48, "tier": "medium"},
+        {"arm": "drug", "bp_drop": 24.0, "age": 55, "tier": "high"},
+        {"arm": "placebo", "bp_drop": 8.0, "age": 44, "tier": "low"},
+        {"arm": "placebo", "bp_drop": 10.0, "age": 50, "tier": "medium"},
+        {"arm": "placebo", "bp_drop": 7.0, "age": 46, "tier": "low"},
+        {"arm": "placebo", "bp_drop": 12.0, "age": 56, "tier": "high"},
+    ]
+    payload = {
+        "data": data,
+        "treatment_col": "arm",
+        "outcome_col": "bp_drop",
+        "confounder_cols": ["age", "tier"],
+        "treated_value": "drug",
+        "control_value": "placebo",
+    }
+    response = client.post("/api/causal/iptw-ate", json=payload)
+    assert response.status_code == 200
+    res_data = response.json()
+    assert res_data["treated_value"] == "drug"
+    assert res_data["control_value"] == "placebo"
+    assert res_data["iptw_ate"] > 0
+    assert "tier" in res_data["categorical_confounders"]
+    assert "age" in res_data["numeric_confounders"]
+
+
+def test_iptw_ate_truncation_applied(example_iptw_payload):
+    """Verify that truncate_weights=True with max_weight caps extreme weights and reports rows_truncated."""
+    payload = {
+        **example_iptw_payload,
+        "truncate_weights": True,
+        "max_weight": 2.0,
+    }
+    response = client.post("/api/causal/iptw-ate", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    ws = data["weight_summary"]
+    assert ws["is_truncated"] is True
+    assert ws["truncation_max_weight"] == 2.0
+    assert ws["max_weight"] <= 2.0 + 1e-6
+    assert all(w <= 2.0 + 1e-6 for w in data["weights"])
+
+
+def test_iptw_ate_extreme_weights_flagged():
+    """Verify that low extreme_weight_threshold flags extreme weights in warnings and weight_summary."""
+    data = [
+        {"t": 1, "y": 10.0, "x": 5.0},
+        {"t": 1, "y": 12.0, "x": 5.2},
+        {"t": 1, "y": 11.0, "x": 5.1},
+        {"t": 1, "y": 15.0, "x": 1.0},
+        {"t": 0, "y": 2.0,  "x": 1.2},
+        {"t": 0, "y": 3.0,  "x": 1.1},
+        {"t": 0, "y": 2.5,  "x": 1.3},
+        {"t": 0, "y": 8.0,  "x": 5.0},
+    ]
+    payload = {
+        "data": data,
+        "treatment_col": "t",
+        "outcome_col": "y",
+        "confounder_cols": ["x"],
+        "extreme_weight_threshold": 3.0,
+    }
+    response = client.post("/api/causal/iptw-ate", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["weight_summary"]["has_extreme_weights"] is True
+    assert data["weight_summary"]["n_extreme_weights"] > 0
+    assert any("extreme" in w.lower() for w in data["warnings"])
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ["data", "treatment_col", "outcome_col", "confounder_cols"],
+)
+def test_iptw_ate_missing_required_fields(example_iptw_payload, missing_field):
+    """Verify that omitting required request fields returns HTTP 422."""
+    payload = {k: v for k, v in example_iptw_payload.items() if k != missing_field}
+    response = client.post("/api/causal/iptw-ate", json=payload)
+    assert response.status_code == 422
+    assert "detail" in response.json()
+    assert "traceback" not in response.text.lower()
+
+
+@pytest.mark.parametrize(
+    "bad_confounders",
+    [
+        [],                    # empty list
+        [""],                  # empty string in list
+        ["   "],               # whitespace string in list
+        ["x", "x"],            # duplicate confounders
+        ["x", "treatment"],    # confounder same as treatment
+        ["x", "outcome"],      # confounder same as outcome
+    ],
+)
+def test_iptw_ate_invalid_confounders(example_iptw_payload, bad_confounders):
+    """Verify that empty, blank, duplicate, or conflicting confounder lists are rejected with HTTP 422."""
+    payload = {**example_iptw_payload, "confounder_cols": bad_confounders}
+    response = client.post("/api/causal/iptw-ate", json=payload)
+    assert response.status_code == 422
+    assert "detail" in response.json()
+
+
+def test_iptw_ate_treatment_and_outcome_same(example_iptw_payload):
+    """Verify rejection when treatment_col is identical to outcome_col."""
+    payload = {**example_iptw_payload, "treatment_col": "outcome", "outcome_col": "outcome"}
+    response = client.post("/api/causal/iptw-ate", json=payload)
+    assert response.status_code == 422
+    assert "cannot be the same column" in str(response.json()["detail"]).lower()
+
+
+def test_iptw_ate_missing_columns_in_data(example_iptw_payload):
+    """Verify rejection with HTTP 422 when specified columns are missing from observation records."""
+    res1 = client.post("/api/causal/iptw-ate", json={**example_iptw_payload, "treatment_col": "non_existent"})
+    assert res1.status_code == 422
+
+    res2 = client.post("/api/causal/iptw-ate", json={**example_iptw_payload, "outcome_col": "non_existent"})
+    assert res2.status_code == 422
+
+    res3 = client.post("/api/causal/iptw-ate", json={**example_iptw_payload, "confounder_cols": ["non_existent"]})
+    assert res3.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "threshold",
+    [-5.0, 0.0, -0.01, True, False, "invalid"],
+)
+def test_iptw_ate_invalid_extreme_weight_threshold(example_iptw_payload, threshold):
+    """Verify that non-positive or non-numeric extreme_weight_threshold values are rejected with HTTP 422."""
+    payload = {**example_iptw_payload, "extreme_weight_threshold": threshold}
+    response = client.post("/api/causal/iptw-ate", json=payload)
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "max_w",
+    [-1.0, 0.0, True, False, "invalid"],
+)
+def test_iptw_ate_invalid_max_weight(example_iptw_payload, max_w):
+    """Verify that non-positive or non-numeric max_weight values are rejected with HTTP 422."""
+    payload = {**example_iptw_payload, "truncate_weights": True, "max_weight": max_w}
+    response = client.post("/api/causal/iptw-ate", json=payload)
+    assert response.status_code == 422
+
+
+def test_iptw_ate_missing_values_rejected_by_default(example_iptw_payload):
+    """Verify that missing values in outcome, treatment, or confounders raise HTTP 422 when drop_missing=False."""
+    bad_data = [dict(row) for row in example_iptw_payload["data"]]
+    bad_data[0]["outcome"] = None
+    payload = {**example_iptw_payload, "data": bad_data, "drop_missing": False}
+    response = client.post("/api/causal/iptw-ate", json=payload)
+    assert response.status_code == 422
+    assert "missing" in str(response.json()["detail"]).lower()
+
+
+def test_iptw_ate_explicit_drop_missing(example_iptw_payload):
+    """Verify that drop_missing=True drops rows with missing values and returns updated counts."""
+    dirty_data = [dict(row) for row in example_iptw_payload["data"]]
+    dirty_data.append({"treatment": 1, "outcome": None, "x": 2.0, "z": 25.0})
+    dirty_data.append({"treatment": None, "outcome": 8.0, "x": 3.0, "z": 28.0})
+    dirty_data.append({"treatment": 0, "outcome": 7.0, "x": None, "z": 24.0})
+
+    payload = {**example_iptw_payload, "data": dirty_data, "drop_missing": True}
+    response = client.post("/api/causal/iptw-ate", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["rows_dropped"] == 3
+    assert data["n_total"] == 8
+
+
+def test_iptw_ate_single_treatment_class():
+    """Verify rejection when the dataset contains only one treatment condition."""
+    data = [
+        {"treatment": 1, "outcome": 10.0, "x": 1.0},
+        {"treatment": 1, "outcome": 12.0, "x": 2.0},
+        {"treatment": 1, "outcome": 14.0, "x": 3.0},
+    ]
+    payload = {
+        "data": data,
+        "treatment_col": "treatment",
+        "outcome_col": "outcome",
+        "confounder_cols": ["x"],
+    }
+    response = client.post("/api/causal/iptw-ate", json=payload)
+    assert response.status_code == 422
+
+
+def test_iptw_ate_zero_variance_confounder():
+    """Verify rejection when a confounder has zero variance across all observations."""
+    data = [
+        {"t": 1, "y": 10.0, "const_c": 5.0},
+        {"t": 1, "y": 12.0, "const_c": 5.0},
+        {"t": 0, "y": 6.0,  "const_c": 5.0},
+        {"t": 0, "y": 8.0,  "const_c": 5.0},
+    ]
+    payload = {
+        "data": data,
+        "treatment_col": "t",
+        "outcome_col": "y",
+        "confounder_cols": ["const_c"],
+    }
+    response = client.post("/api/causal/iptw-ate", json=payload)
+    assert response.status_code == 422
+    assert "zero variance" in str(response.json()["detail"]).lower()
+
+
+def test_iptw_ate_nonnumeric_outcome():
+    """Verify rejection when outcome column contains non-numeric string values."""
+    data = [
+        {"t": 1, "y": "improved", "x": 1.0},
+        {"t": 1, "y": "improved", "x": 2.0},
+        {"t": 0, "y": "constant", "x": 1.0},
+        {"t": 0, "y": "constant", "x": 2.0},
+    ]
+    payload = {
+        "data": data,
+        "treatment_col": "t",
+        "outcome_col": "y",
+        "confounder_cols": ["x"],
+    }
+    response = client.post("/api/causal/iptw-ate", json=payload)
+    assert response.status_code == 422
+
+
+def test_iptw_ate_positivity_violation_error(monkeypatch, example_iptw_payload):
+    """Verify that positivity violation in engine is returned as HTTP 422 without traceback."""
+    def mock_iptw(*args, **kwargs):
+        raise ValueError("Positivity violation: 2 observation(s) have an assigned-treatment probability of zero.")
+
+    monkeypatch.setattr("api.estimate_iptw_ate", mock_iptw)
+    response = client.post("/api/causal/iptw-ate", json=example_iptw_payload)
+    assert response.status_code == 422
+    assert "positivity violation" in str(response.json()["detail"]).lower()
+    assert "traceback" not in response.text.lower()
+
+
+def test_causal_all_four_endpoints_coexist(
+    example_causal_payload,
+    example_regression_causal_payload,
+    example_propensity_payload,
+    example_iptw_payload,
+):
+    """Verify that unadjusted ATE, regression-adjusted ATE, propensity scores, and IPTW ATE all coexist."""
+    res1 = client.post("/api/causal/unadjusted-ate", json=example_causal_payload)
+    assert res1.status_code == 200
+    assert res1.json()["estimator"] == "unadjusted_difference_in_means"
+
+    res2 = client.post("/api/causal/regression-adjusted-ate", json=example_regression_causal_payload)
+    assert res2.status_code == 200
+    assert res2.json()["estimator"] == "regression_adjusted_ate"
+
+    res3 = client.post("/api/causal/propensity-scores", json=example_propensity_payload)
+    assert res3.status_code == 200
+    assert res3.json()["estimator"] == "logistic_propensity_score"
+
+    res4 = client.post("/api/causal/iptw-ate", json=example_iptw_payload)
+    assert res4.status_code == 200
+    assert res4.json()["estimator"] == "iptw_ate"
+
 
 
 

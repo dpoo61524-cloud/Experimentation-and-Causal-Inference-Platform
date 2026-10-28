@@ -30,6 +30,7 @@ from causal_engine import (
     estimate_unadjusted_ate_with_uncertainty,
     estimate_regression_adjusted_ate,
     estimate_propensity_scores,
+    estimate_iptw_ate,
 )
 import numpy as np
 
@@ -1385,7 +1386,260 @@ async def propensity_scores_endpoint(
         )
 
 
+
+class CausalIPTWATERequest(BaseModel):
+    data: List[Dict[str, Any]] = Field(
+        ...,
+        description="Tabular dataset as a non-empty list of observation record dictionaries.",
+        examples=[
+            [
+                {"treatment": 1, "outcome": 10.0, "x": 1.0, "z": 20.0},
+                {"treatment": 1, "outcome": 12.0, "x": 2.0, "z": 25.0},
+                {"treatment": 1, "outcome": 14.0, "x": 3.0, "z": 30.0},
+                {"treatment": 1, "outcome": 16.0, "x": 4.0, "z": 35.0},
+                {"treatment": 0, "outcome": 5.0,  "x": 1.0, "z": 22.0},
+                {"treatment": 0, "outcome": 7.0,  "x": 2.0, "z": 24.0},
+                {"treatment": 0, "outcome": 9.0,  "x": 3.0, "z": 28.0},
+                {"treatment": 0, "outcome": 11.0, "x": 4.0, "z": 32.0},
+            ]
+        ],
+    )
+    treatment_col: str = Field(
+        ...,
+        description="Name of the binary treatment indicator column in the dataset.",
+        examples=["treatment"],
+    )
+    outcome_col: str = Field(
+        ...,
+        description="Name of the numeric outcome column in the dataset.",
+        examples=["outcome"],
+    )
+    confounder_cols: List[str] = Field(
+        ...,
+        description="Non-empty list of observed confounder column names.",
+        examples=[["x", "z"]],
+    )
+    treated_value: Optional[Any] = Field(
+        None,
+        description="Optional label identifying treated observations. Inferred automatically if omitted.",
+        examples=[1],
+    )
+    untreated_value: Optional[Any] = Field(
+        None,
+        description="Optional label identifying control/untreated observations. Inferred automatically if omitted.",
+        examples=[0],
+    )
+    control_value: Optional[Any] = Field(
+        None,
+        description="Alias for untreated_value.",
+        examples=[0],
+    )
+    drop_missing: bool = Field(
+        default=False,
+        description="Whether to explicitly drop rows with missing values across analysis columns. Default is false.",
+        examples=[False],
+    )
+    extreme_weight_threshold: float = Field(
+        default=20.0,
+        description="Diagnostic threshold above which a weight is flagged as extreme.",
+        examples=[20.0],
+    )
+    truncate_weights: bool = Field(
+        default=False,
+        description="Whether to truncate (clip) weights above max_weight. Default is false.",
+        examples=[False],
+    )
+    max_weight: Optional[float] = Field(
+        None,
+        description="Maximum weight threshold used if truncate_weights is true.",
+        examples=[10.0],
+    )
+
+    @field_validator("data")
+    @classmethod
+    def validate_data_list(cls, v: Any) -> List[Dict[str, Any]]:
+        if not isinstance(v, list):
+            raise ValueError("data must be a list of observation dictionaries.")
+        if len(v) == 0:
+            raise ValueError("data cannot be empty. Causal inference requires observations.")
+        for idx, row in enumerate(v):
+            if not isinstance(row, dict):
+                raise ValueError(f"Observation at index {idx} must be a dictionary, got {type(row).__name__}.")
+        return v
+
+    @field_validator("treatment_col", "outcome_col")
+    @classmethod
+    def validate_column_names(cls, v: Any, info: Any) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError(f"{info.field_name} must be a non-empty string.")
+        return v.strip()
+
+    @field_validator("confounder_cols")
+    @classmethod
+    def validate_confounders(cls, v: Any) -> List[str]:
+        if not isinstance(v, list):
+            raise ValueError("confounder_cols must be a list of column names.")
+        if len(v) == 0:
+            raise ValueError("confounder_cols must contain at least one column name.")
+        clean_cols = []
+        for idx, col in enumerate(v):
+            if not isinstance(col, str) or not col.strip():
+                raise ValueError(f"Confounder column at index {idx} must be a non-empty string.")
+            clean_cols.append(col.strip())
+        return clean_cols
+
+    @field_validator("drop_missing", "truncate_weights")
+    @classmethod
+    def validate_booleans(cls, v: Any, info: Any) -> bool:
+        if not isinstance(v, bool):
+            raise ValueError(f"{info.field_name} must be a boolean.")
+        return v
+
+    @field_validator("extreme_weight_threshold", mode="before")
+    @classmethod
+    def validate_extreme_weight_threshold(cls, v: Any) -> float:
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError("extreme_weight_threshold must be a numeric float.")
+        fv = float(v)
+        if math.isnan(fv) or math.isinf(fv) or fv <= 0:
+            raise ValueError("extreme_weight_threshold must be a positive finite number (> 0).")
+        return fv
+
+    @field_validator("max_weight", mode="before")
+    @classmethod
+    def validate_max_weight(cls, v: Any) -> Optional[float]:
+        if v is None:
+            return None
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError("max_weight must be a numeric float.")
+        fv = float(v)
+        if math.isnan(fv) or math.isinf(fv) or fv <= 0:
+            raise ValueError("max_weight must be a positive finite number (> 0).")
+        return fv
+
+    @model_validator(mode="after")
+    def validate_model_consistency(self) -> "CausalIPTWATERequest":
+        if self.treatment_col == self.outcome_col:
+            raise ValueError(
+                f"treatment_col and outcome_col cannot be the same column ('{self.treatment_col}')."
+            )
+        for col in self.confounder_cols:
+            if col == self.treatment_col:
+                raise ValueError(
+                    f"Confounder column '{col}' cannot also be the treatment column."
+                )
+            if col == self.outcome_col:
+                raise ValueError(
+                    f"Confounder column '{col}' cannot also be the outcome column."
+                )
+        if len(self.confounder_cols) != len(set(self.confounder_cols)):
+            raise ValueError(
+                f"confounder_cols contains duplicate column names: {self.confounder_cols}."
+            )
+        if self.truncate_weights and self.max_weight is not None and self.max_weight <= 0:
+            raise ValueError(
+                f"max_weight must be positive when truncate_weights is enabled, got {self.max_weight}."
+            )
+        return self
+
+
+class CausalIPTWATEResponse(BaseModel):
+    estimator: str = Field(..., description="Name of the estimator used (iptw_ate)")
+    iptw_ate: float = Field(..., description="Estimated IPTW Average Treatment Effect (treated minus control)")
+    ate: float = Field(..., description="Alias for iptw_ate")
+    weighted_mean_outcome_treated: float = Field(..., description="Weighted mean outcome of the treated group")
+    weighted_mean_outcome_control: float = Field(..., description="Weighted mean outcome of the control/untreated group")
+    weighted_mean_treated: Optional[float] = Field(None, description="Alias for weighted_mean_outcome_treated")
+    weighted_mean_control: Optional[float] = Field(None, description="Alias for weighted_mean_outcome_control")
+    unadjusted_ate: float = Field(..., description="Unadjusted difference in sample means (treated minus control)")
+    raw_difference: float = Field(..., description="Alias for unadjusted_ate")
+    difference_in_means: float = Field(..., description="Alias for unadjusted_ate")
+    n_total: int = Field(..., description="Total number of observations used in estimation")
+    n_treated: int = Field(..., description="Number of treated observations")
+    n_control: int = Field(..., description="Number of control/untreated observations")
+    n_untreated: int = Field(..., description="Alias for n_control")
+    treatment_col: str = Field(..., description="Name of the treatment column")
+    outcome_col: str = Field(..., description="Name of the outcome column")
+    confounder_cols: List[str] = Field(..., description="List of confounder column names")
+    numeric_confounders: List[str] = Field(..., description="List of continuous numeric confounder columns")
+    categorical_confounders: List[str] = Field(..., description="List of categorical confounder columns")
+    treated_value: Any = Field(..., description="Resolved value representing the treated condition")
+    control_value: Any = Field(..., description="Resolved value representing the control condition")
+    untreated_value: Any = Field(..., description="Alias for control_value")
+    rows_dropped: int = Field(0, description="Number of rows dropped due to missing data")
+    propensity_score_summary: Dict[str, float] = Field(..., description="Summary statistics of estimated propensity scores")
+    weight_summary: Dict[str, Any] = Field(..., description="Summary statistics and diagnostic flags for IPTW weights")
+    weights: List[float] = Field(..., description="IPTW weights assigned to each observation")
+    ess_treated: float = Field(..., description="Kish's effective sample size for the treated group")
+    ess_control: float = Field(..., description="Kish's effective sample size for the control group")
+    ess_total: float = Field(..., description="Total effective sample size (ess_treated + ess_control)")
+    effective_sample_size_treated: Optional[float] = Field(None, description="Alias for ess_treated")
+    effective_sample_size_control: Optional[float] = Field(None, description="Alias for ess_control")
+    effective_sample_size_total: Optional[float] = Field(None, description="Alias for ess_total")
+    ess_treated_fraction: float = Field(..., description="Ratio of effective sample size to nominal size for treated group")
+    ess_control_fraction: float = Field(..., description="Ratio of effective sample size to nominal size for control group")
+    overlap_diagnostics: Dict[str, Any] = Field(..., description="Comprehensive overlap and common support diagnostics")
+    covariate_balance_before: Dict[str, Any] = Field(..., description="Covariate standardized mean differences before weighting")
+    covariate_balance_after: Dict[str, Any] = Field(..., description="Covariate standardized mean differences after weighting")
+    balance_summary: Dict[str, Any] = Field(..., description="Summary of covariate balance improvement after weighting")
+    covariate_balance: Optional[Dict[str, Any]] = Field(None, description="Convenience mapping containing before, after, and summary balance")
+    warnings: List[str] = Field(..., description="Diagnostic warnings regarding extreme weights, overlap, or sample size")
+    interpretation: str = Field(..., description="Concise interpretation of IPTW effect, effective sample sizes, and balance")
+    assumptions: str = Field(..., description="Educational explanation of identifying assumptions and confounding limitations")
+
+
+@app.post(
+    "/api/causal/iptw-ate",
+    response_model=CausalIPTWATEResponse,
+    tags=["Causal Inference"],
+    summary="Estimate Average Treatment Effect (ATE) using IPTW",
+)
+async def iptw_ate_endpoint(
+    payload: CausalIPTWATERequest,
+) -> Dict[str, Any]:
+    """Estimate the Average Treatment Effect (ATE) using Inverse Probability of Treatment Weighting (IPTW).
+
+    Fits a propensity score model to estimate observation assignment probabilities, computes
+    unstabilized IPTW weights (1 / p_i), calculates Hájek-style weighted outcome means for
+    treated and control groups, computes effective sample sizes (ESS), and evaluates covariate
+    balance improvements via standardized mean differences (SMDs) before and after weighting.
+    """
+    try:
+        untreated_val = payload.untreated_value if payload.untreated_value is not None else payload.control_value
+        results = estimate_iptw_ate(
+            data=payload.data,
+            treatment_col=payload.treatment_col,
+            outcome_col=payload.outcome_col,
+            confounder_cols=payload.confounder_cols,
+            treated_value=payload.treated_value,
+            untreated_value=untreated_val,
+            control_value=untreated_val,
+            drop_missing=payload.drop_missing,
+            extreme_weight_threshold=payload.extreme_weight_threshold,
+            truncate_weights=payload.truncate_weights,
+            max_weight=payload.max_weight,
+        )
+        # Populate convenient aliases for response consistency
+        results["weighted_mean_treated"] = results["weighted_mean_outcome_treated"]
+        results["weighted_mean_control"] = results["weighted_mean_outcome_control"]
+        results["effective_sample_size_treated"] = results["ess_treated"]
+        results["effective_sample_size_control"] = results["ess_control"]
+        results["effective_sample_size_total"] = results["ess_total"]
+        results["covariate_balance"] = {
+            "before": results["covariate_balance_before"],
+            "after": results["covariate_balance_after"],
+            "summary": results["balance_summary"],
+        }
+        return _sanitize_for_json(results)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=str(exc),
+        )
+
+
 if __name__ == "__main__":
     uvicorn.run("api:app", host="127.0.0.1", port=8000, reload=True)
+
 
 

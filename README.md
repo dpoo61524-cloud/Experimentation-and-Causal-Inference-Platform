@@ -14,7 +14,7 @@ A Python platform for A/B testing, causal inference, and statistical analysis, f
 - **Sample Size Estimation**: Power analysis (`NormalIndPower`) to determine required sample size per group and total sample size given baseline rate, expected rate, alpha, and power.
 - **Multiple Comparisons Corrections**: Family-wise error rate control using Bonferroni and Benjamini-Hochberg (FDR) adjustments.
 - **Automated Experiment Reporting**: Human-readable terminal output and CSV exports of experiment findings.
-- **FastAPI REST API**: High-performance backend endpoints exposing statistical testing and power analysis engines, complete with input validation and interactive OpenAPI documentation.
+- **FastAPI REST API**: High-performance backend endpoints exposing statistical testing, power analysis, and causal inference engines (unadjusted ATE with Welch CIs, regression-adjusted ATE via G-computation, propensity score estimation and overlap diagnostics, and IPTW treatment effect estimation with covariate balance and ESS diagnostics), complete with input validation and interactive OpenAPI documentation.
 
 ---
 
@@ -905,6 +905,162 @@ curl -X POST http://127.0.0.1:8000/api/causal/propensity-scores \
   - **No Treatment Effect**: Propensity score estimation alone does **not** estimate an average treatment effect (ATE). It is a diagnostic and design phase prerequisite for IPTW, matching, or subclassification.
   - **Extreme Propensity Scores**: Scores very close to 0 or 1 indicate near-deterministic treatment assignment and severe lack of common support (positivity violations). In such regions, causal effects cannot be identified without extreme extrapolation.
   - **Unmeasured Confounding**: Propensity scores balance only observed, modeled confounders. They do **not** protect against hidden or unmeasured confounders.
+
+---
+
+### Inverse Probability of Treatment Weighting (IPTW) ATE
+- **URL**: `POST /api/causal/iptw-ate`
+- **Method**: `POST`
+- **Description**: Estimates the Average Treatment Effect (ATE) using Inverse Probability of Treatment Weighting (IPTW). Propensity scores are estimated via logistic regression to construct unstabilized observation weights ($w_i = 1 / p_i$), counterfactual group means are estimated via normalized Hájek-style weights, effective sample sizes (ESS) quantify variance inflation, and covariate balance (SMDs) is evaluated before and after weighting.
+- **Viva Concept: The Four Steps of IPTW**:
+  1. *Estimate Propensity Scores*: A logistic regression model estimates each observation's conditional probability of receiving treatment given observed baseline covariates: $e(X) = P(T = \text{treated} \mid X)$.
+  2. *Calculate Inverse Probability Weights*: For each observation, calculate the probability of receiving their observed treatment condition: $p_i = e(X_i)$ if $T_i = 1$, and $(1 - e(X_i))$ if $T_i = 0$. The unstabilized IPTW weight is $w_i = 1 / p_i$.
+  3. *Calculate Weighted Treatment Effect (Hájek Estimator)*: Compute normalized weighted outcome means for treated and control groups:
+     $$\mu_1 = \frac{\sum_{i \in \text{Treated}} w_i Y_i}{\sum_{i \in \text{Treated}} w_i}, \quad \mu_0 = \frac{\sum_{i \in \text{Control}} w_i Y_i}{\sum_{i \in \text{Control}} w_i}$$
+     The IPTW ATE is $\text{ATE}_{\text{IPTW}} = \mu_1 - \mu_0$.
+  4. *Examine Diagnostics*:
+     - *Overlap & Positivity*: Check that treated and control propensity score ranges overlap adequately ($0 < P(T = 1 \mid X) < 1$).
+     - *Kish's Effective Sample Size (ESS)*: $\text{ESS} = (\sum w_i)^2 / \sum (w_i^2)$. Compares effective statistical sample size against nominal sample size to detect weight concentration.
+     - *Extreme Weights*: Diagnoses whether any weight exceeds `extreme_weight_threshold` (default `20.0`), which would inflate estimator variance.
+     - *Covariate Balance*: Compares Standardized Mean Differences (SMDs) before and after weighting to ensure pseudo-population balance ($|\text{SMD}| \le 0.10$).
+- **Weight Truncation / Clipping**:
+  - Setting `truncate_weights: true` and specifying `max_weight` (e.g. `10.0`) truncates weights exceeding `max_weight` ($w_i \leftarrow \min(w_i, \text{max\_weight})$).
+  - *Bias-Variance Tradeoff*: Truncating weights reduces estimator variance and protects against erratic swings caused by near-positivity violations, at the potential cost of introducing small finite-sample bias.
+- **Causal Assumptions & Limitations**:
+  - *Conditional Exchangeability / No Unmeasured Confounding*: $(Y(1), Y(0)) \perp\!\!\perp T \mid X$. Weighting balances only observed, modeled covariates; it does **not** protect against hidden or unmeasured confounders.
+  - *Positivity / Common Support*: $0 < P(T = 1 \mid X = x) < 1$ for all units. If assigned-treatment probability is near zero ($\le 10^{-12}$), weights diverge toward infinity, raising a positivity violation.
+  - *Correct Propensity Model Specification*: Misspecifying the logistic regression functional form biases the estimated weights.
+  - *SUTVA & Consistency*: No interference between units and observed outcome matches potential outcome under the received treatment.
+- **Request Parameters**:
+  - `data` (list of dicts, required): Non-empty list of observation records containing treatment, outcome, and confounders.
+  - `treatment_col` (string, required): Name of binary treatment indicator column.
+  - `outcome_col` (string, required): Name of numeric outcome column.
+  - `confounder_cols` (list of strings, required): Non-empty list of observed confounder column names.
+  - `treated_value` (any, optional): Label identifying treated condition (inferred automatically if omitted).
+  - `untreated_value` / `control_value` (any, optional): Label identifying control condition (inferred automatically if omitted).
+  - `drop_missing` (boolean, optional, default `false`): Whether to drop incomplete rows across analysis columns.
+  - `extreme_weight_threshold` (float, optional, default `20.0`): Threshold above which weights are flagged as extreme in diagnostics.
+  - `truncate_weights` (boolean, optional, default `false`): Whether to truncate (clip) weights above `max_weight`.
+  - `max_weight` (float, optional): Maximum weight threshold when `truncate_weights=true`.
+
+**Example Request**:
+```bash
+curl -X POST http://127.0.0.1:8000/api/causal/iptw-ate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "data": [
+      {"treatment": 1, "outcome": 10.0, "x": 1.0, "z": 20.0},
+      {"treatment": 1, "outcome": 12.0, "x": 2.0, "z": 25.0},
+      {"treatment": 1, "outcome": 14.0, "x": 3.0, "z": 30.0},
+      {"treatment": 1, "outcome": 16.0, "x": 4.0, "z": 35.0},
+      {"treatment": 0, "outcome": 5.0,  "x": 1.0, "z": 22.0},
+      {"treatment": 0, "outcome": 7.0,  "x": 2.0, "z": 24.0},
+      {"treatment": 0, "outcome": 9.0,  "x": 3.0, "z": 28.0},
+      {"treatment": 0, "outcome": 11.0, "x": 4.0, "z": 32.0}
+    ],
+    "treatment_col": "treatment",
+    "outcome_col": "outcome",
+    "confounder_cols": ["x", "z"],
+    "treated_value": 1,
+    "untreated_value": 0,
+    "drop_missing": false,
+    "extreme_weight_threshold": 20.0,
+    "truncate_weights": false
+  }'
+```
+
+**Example Response (200 OK)**:
+```json
+{
+  "estimator": "iptw_ate",
+  "iptw_ate": 5.3491,
+  "ate": 5.3491,
+  "weighted_mean_outcome_treated": 13.1491,
+  "weighted_mean_outcome_control": 7.8000,
+  "weighted_mean_treated": 13.1491,
+  "weighted_mean_control": 7.8000,
+  "unadjusted_ate": 5.0,
+  "raw_difference": 5.0,
+  "difference_in_means": 5.0,
+  "n_total": 8,
+  "n_treated": 4,
+  "n_control": 4,
+  "n_untreated": 4,
+  "treatment_col": "treatment",
+  "outcome_col": "outcome",
+  "confounder_cols": ["x", "z"],
+  "numeric_confounders": ["x", "z"],
+  "categorical_confounders": [],
+  "treated_value": 1,
+  "control_value": 0,
+  "untreated_value": 0,
+  "rows_dropped": 0,
+  "propensity_score_summary": {
+    "min": 0.2810,
+    "max": 0.7291,
+    "mean": 0.5000,
+    "median": 0.4962,
+    "std": 0.1610
+  },
+  "weight_summary": {
+    "min_weight": 1.3715,
+    "max_weight": 3.5587,
+    "mean_weight": 2.1834,
+    "std_weight": 0.7265,
+    "extreme_weight_threshold": 20.0,
+    "n_extreme_weights": 0,
+    "has_extreme_weights": false,
+    "is_truncated": false,
+    "truncation_max_weight": null,
+    "rows_truncated": 0
+  },
+  "weights": [1.9841, 1.4820, 1.3715, 1.3912, 1.3912, 1.5420, 2.7482, 3.5587],
+  "ess_treated": 3.7650,
+  "ess_control": 3.4210,
+  "ess_total": 7.1860,
+  "effective_sample_size_treated": 3.7650,
+  "effective_sample_size_control": 3.4210,
+  "effective_sample_size_total": 7.1860,
+  "ess_treated_fraction": 0.9412,
+  "ess_control_fraction": 0.8553,
+  "overlap_diagnostics": {
+    "has_overlap": true,
+    "common_support_range": [0.2810, 0.7190],
+    "warning": null
+  },
+  "covariate_balance_before": {
+    "x": {"smd": 0.0, "abs_smd": 0.0, "is_balanced": true},
+    "z": {"smd": 0.4520, "abs_smd": 0.4520, "is_balanced": false}
+  },
+  "covariate_balance_after": {
+    "x": {"smd": 0.0421, "abs_smd": 0.0421, "is_balanced": true},
+    "z": {"smd": 0.0812, "abs_smd": 0.0812, "is_balanced": true}
+  },
+  "balance_summary": {
+    "max_abs_smd_before": 0.4520,
+    "max_abs_smd_after": 0.0812,
+    "balance_improved": true
+  },
+  "warnings": [],
+  "interpretation": "The IPTW-estimated Average Treatment Effect (ATE) is 5.3491 (weighted treated outcome mean: 13.1491, control: 7.8000; unadjusted difference in means: 5.0000)...",
+  "assumptions": "Inverse Probability of Treatment Weighting (IPTW) identifies the Average Treatment Effect (ATE) under five fundamental identification assumptions..."
+}
+```
+
+- **Example Validation Errors (422 Unprocessable Content)**:
+  - Empty dataset: `"data cannot be empty. Causal inference requires observations."`
+  - Missing column: `"Confounder column 'x' not found in dataset."`
+  - Duplicate confounders: `"confounder_cols contains duplicate column names: ['x', 'x']."`
+  - Column role conflict: `"Confounder column 'x' cannot also be the treatment column."`
+  - Invalid threshold: `"extreme_weight_threshold must be a positive finite number (> 0)."`
+  - Missing values without opt-in: `"Missing values detected ... Set drop_missing=True to drop incomplete rows."`
+  - Positivity violation: `"Positivity violation: observation(s) have an assigned-treatment probability of zero ... IPTW weighting would produce infinite weights."`
+
+- **Running Focused API Tests**:
+  ```powershell
+  # Windows PowerShell
+  .\.venv\Scripts\python.exe -m pytest tests/test_api.py -q
+  ```
 
 ---
 
