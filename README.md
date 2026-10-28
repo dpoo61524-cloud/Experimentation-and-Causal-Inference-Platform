@@ -14,7 +14,9 @@ A Python platform for A/B testing, causal inference, and statistical analysis, f
 - **Sample Size Estimation**: Power analysis (`NormalIndPower`) to determine required sample size per group and total sample size given baseline rate, expected rate, alpha, and power.
 - **Multiple Comparisons Corrections**: Family-wise error rate control using Bonferroni and Benjamini-Hochberg (FDR) adjustments.
 - **Automated Experiment Reporting**: Human-readable terminal output and CSV exports of experiment findings.
-- **FastAPI REST API**: High-performance backend endpoints exposing statistical testing, power analysis, and causal inference engines (unadjusted ATE with Welch CIs, regression-adjusted ATE via G-computation, propensity score estimation and overlap diagnostics, IPTW treatment effect estimation with covariate balance and ESS diagnostics, Difference-in-Differences treatment effect estimation, and Causal Sensitivity Analysis with multi-estimator comparisons, IPTW weight truncation, and unmeasured confounding scenarios), complete with input validation and interactive OpenAPI documentation.
+- **FastAPI REST API**: High-performance backend endpoints exposing statistical testing, power analysis, dataset storage, and causal inference engines, complete with robust schema validation, error handling, and OpenAPI documentation.
+- **Interactive Web Dashboard**: Clean, responsive frontend interface (`/dashboard`) styled in a Charcoal & Sage Green theme, providing live API health checks, chunked CSV uploads, schema inspection, Hillstrom benchmark loading, and execution of all six causal inference workflows without external heavy JavaScript frameworks.
+- **Dataset Storage & Ingestion Engine**: Chunked streaming CSV ingestion with single-pass type inference (boolean &rarr; integer &rarr; numeric &rarr; categorical), bounded memory, 500 MB upload limit, 50-dataset registry capacity, 24-hour TTL, and explicit dataset deletion.
 
 ---
 
@@ -66,6 +68,7 @@ python src/api.py
 
 The API will be accessible at:
 - **API Base URL**: `http://127.0.0.1:8000`
+- **Interactive Web Dashboard**: `http://127.0.0.1:8000/dashboard`
 - **Interactive Documentation (Swagger UI)**: `http://127.0.0.1:8000/docs`
 - **Alternative Documentation (ReDoc)**: `http://127.0.0.1:8000/redoc`
 
@@ -1397,6 +1400,85 @@ curl -X POST http://127.0.0.1:8000/api/causal/sensitivity-analysis \
   1. *Why doesn't multi-estimator agreement prove causality?* If an unmeasured confounder $U$ affects both treatment assignment and the outcome, all three estimators (unadjusted, G-computation, and IPTW) will be equally biased because none of them adjust for $U$. Agreement shows that the functional form (linear outcome model vs. logistic propensity model) does not drastically distort the result, but cannot substitute for unconfoundedness.
   2. *What is the bias-variance trade-off in IPTW weight truncation?* Weight truncation caps large weights at a fixed threshold $M$. While this eliminates huge variance and stabilizes the effective sample size (ESS), it introduces finite-sample bias and alters the target estimand from the true population ATE to a pseudo-population where extreme units receive downweighted influence.
   3. *Why can't sensitivity analysis produce a "robustness p-value"?* Sensitivity parameters (hypothetical bias $b$) are subjective assumptions exploring "what-if" scenarios. Inventing a pseudo p-value would falsely imply that the unmeasured confounder's distribution was known and empirically tested. The adjusted interval $[L - b, U - b]$ is purely conditional on the assumption that the true unmeasured bias is exactly $b$.
+
+---
+
+## Dataset Management & Interactive Web Dashboard
+
+The platform includes an interactive frontend dashboard (`http://127.0.0.1:8000/dashboard`) built with semantic HTML, vanilla CSS, and vanilla JavaScript. It adheres to an academic Charcoal & Sage Green visual theme, avoiding flashy animations, gradients, or heavy external framework dependencies.
+
+### 1. Ingestion Architecture & Storage Lifecycle
+
+Datasets uploaded to the platform are managed by `DatasetManager` (`src/dataset_manager.py`):
+- **Streaming Ingestion**: Files uploaded via `POST /api/dataset/upload` are streamed to disk in chunks with bounded memory consumption rather than loaded entirely into RAM.
+- **Temporary Storage Directory**: Datasets are stored in a managed local temporary directory (`tempfile.mkdtemp(prefix="exp_platform_datasets_")`).
+- **Upload Size Limit**: Strictly enforced at **500 MB** (`max_upload_size_bytes = 500 * 1024 * 1024`). Files exceeding this limit are aborted and rejected with HTTP 413.
+- **Registry Capacity**: The in-memory catalog tracks up to **50 datasets** (`max_registry_size = 50`). When capacity is exceeded, least-recently-used non-benchmark datasets are automatically unlinked from disk and removed.
+- **Time-to-Live (TTL)**: Datasets expire after **24 hours** (`ttl_seconds = 86400`) from their creation time. Expired datasets are cleaned up and subsequent requests return HTTP 404.
+- **Explicit Deletion**: Clients can immediately delete an active dataset via `DELETE /api/dataset/{dataset_id}`, freeing on-disk storage and evicting the dataset from the registry.
+- **Benchmark Dataset**: The Kevin Hillstrom MineThatData email campaign dataset (64,000 customers, 12 attributes) is stored server-side at `data/hillstrom.csv` and loaded only upon explicit client request via `POST /api/dataset/load-benchmark`.
+
+### 2. Type Inference Lattice & Missing-Value Policies
+
+- **Single-Pass Type Inference**: During ingestion, column data types are inferred via a single-pass streaming lattice:
+  $$\text{boolean} \longrightarrow \text{integer} \longrightarrow \text{numeric} \longrightarrow \text{categorical}$$
+- **Recognized Missing Values**: The following tokens (case-insensitive) are recognized as missing: `""` (empty string), `NA`, `N/A`, `null`, `none`, `nan`, `.`, and whitespace-only cells.
+- **Strict Missing Data Policy**: By default (`drop_missing=false`), causal estimation endpoints reject datasets containing missing values in the requested analysis columns with HTTP 422, preserving data integrity. When `drop_missing=true` is explicitly provided, incomplete records across the selected analysis columns are dropped, and precise row accounting is returned:
+  - `total_dataset_rows`: Total records in the stored dataset on disk.
+  - `n_total`: Number of complete records evaluated by the statistical engine.
+  - `rows_dropped`: Number of records excluded due to missing values.
+
+---
+
+## Dataset-Based Causal Inference Workflows
+
+The platform provides six dataset-backed causal estimation endpoints operating directly on cataloged datasets on disk:
+
+| Endpoint | Method | Key Request Fields | Statistical Estimator / Engine |
+| :--- | :--- | :--- | :--- |
+| `/api/dataset/{id}/causal/unadjusted-ate` | `POST` | `treatment_col`, `outcome_col`, `drop_missing`, `confidence_level` | Difference in sample means with Welch robust standard errors and Welch–Satterthwaite degrees of freedom |
+| `/api/dataset/{id}/causal/regression-adjusted-ate` | `POST` | `treatment_col`, `outcome_col`, `confounder_cols`, `drop_missing` | G-computation (standardization) over an OLS outcome regression model adjusting for continuous & categorical covariates |
+| `/api/dataset/{id}/causal/propensity-scores` | `POST` | `treatment_col`, `confounder_cols`, `near_zero_threshold`, `near_one_threshold` | Logistic regression propensity model $e(X) = P(T=1 \mid X)$, common support interval, boundary counts, and baseline SMD covariate balance |
+| `/api/dataset/{id}/causal/iptw-ate` | `POST` | `treatment_col`, `outcome_col`, `confounder_cols`, `truncate_weights`, `max_weight` | Hájek normalized inverse probability weighting, Kish effective sample size (ESS), and post-weighting covariate balance checks |
+| `/api/dataset/{id}/causal/difference-in-differences` | `POST` | `treatment_col`, `time_col`, `outcome_col`, `drop_missing` | Canonical $2 \times 2$ group-period Difference-in-Differences $(\bar{Y}_{\text{treat, post}} - \bar{Y}_{\text{treat, pre}}) - (\bar{Y}_{\text{ctrl, post}} - \bar{Y}_{\text{ctrl, pre}})$ |
+| `/api/dataset/{id}/causal/sensitivity-analysis` | `POST` | `treatment_col`, `outcome_col`, `confounder_cols`, `bias_values`, `truncation_thresholds` | Tri-estimator robustness comparison (Unadjusted, Regression, IPTW), weight truncation bounds, and hypothetical signed additive confounding scenarios |
+
+---
+
+## Identification Assumptions, Methodological Scope, and Known Limitations
+
+### 1. Fundamental Causal Identification Assumptions
+
+Any causal claim generated by the platform relies on foundational identification assumptions that cannot be verified by data alone:
+1. **Conditional Exchangeability / Unconfoundedness**:
+   $$(Y(1), Y(0)) \perp T \mid X$$
+   All common causes of treatment assignment and the outcome must be measured and included in $X$. Unmeasured confounding creates omitted-variable bias across all observational estimators.
+2. **Positivity / Common Support**:
+   $$0 < P(T = 1 \mid X = x) < 1 \quad \forall x \text{ with } P(X = x) > 0$$
+   Every unit must have a non-zero probability of receiving either treatment condition. Positivity violations produce near-boundary propensity scores and unstable inverse probability weights.
+3. **Stable Unit Treatment Value Assumption (SUTVA)**:
+   No interference between units (one unit's treatment does not affect another's outcome) and no hidden variations of treatment.
+4. **Parallel Trends (Difference-in-Differences)**:
+   In the absence of treatment, the average outcome of the treated group would have followed the same trajectory over time as the control group. Requires observations across all four $2 \times 2$ group-period cells and absence of differential shocks.
+
+### 2. Diagnostic Role of Propensity Scores
+
+Propensity scores $e(X)$ are conditional probabilities of treatment assignment used to diagnose common support and covariate overlap. **Propensity scores are diagnostic tools, not treatment-effect estimates.** They indicate whether observational groups are comparable, but do not quantify treatment impact on the outcome.
+
+### 3. Purpose and Interpretation of Sensitivity Analysis
+
+Sensitivity analysis evaluates whether qualitative conclusions are vulnerable to potential violations of exchangeability or weighting instability:
+- **Hypothetical Parameter**: The bias parameter $b$ in $\tau_{\text{adj}} = \tau_{\text{obs}} - b$ is an assumed hypothetical quantity, **not** an empirically identified statistic.
+- **Informational Bound**: Sensitivity scenarios illustrate what magnitude of confounding would nullify an estimate, but **do not prove that unmeasured confounding is absent**.
+
+### 4. Honest Scope & Unimplemented Features
+
+To maintain academic and professional integrity, the following boundaries and limitations are explicitly noted:
+- **No E-Values**: The platform does not implement Ding & VanderWeele E-values.
+- **No Rosenbaum Bounds**: Non-parametric sensitivity bounds for Wilcoxon signed-rank tests are not implemented.
+- **No Clustered Standard Errors**: Clustered standard errors, panel fixed-effects regressions, and generalized estimating equations (GEE) are not implemented.
+- **Single-Node Storage**: Dataset storage is temporary and single-node local disk (not a distributed data warehouse or cloud-scale object store).
+- **Tested Scale**: The platform is tested and verified on datasets up to **64,000 rows** (the Hillstrom benchmark, executing in approximately 15–20 seconds). Workloads of massive scale (e.g., 10 million rows or distributed big data) are **not supported or guaranteed**.
 
 ---
 
