@@ -3038,6 +3038,300 @@ def test_causal_all_six_endpoints_coexist(
     assert res6.json()["reference_estimator"] == "regression_adjusted"
 
 
+# ===========================================================================
+# Stage 6 Task 6.7: Causal API Cross-Endpoint Integration Review Tests
+# ===========================================================================
+
+from causal_engine import (
+    estimate_unadjusted_ate_with_uncertainty,
+    estimate_regression_adjusted_ate,
+    estimate_propensity_scores,
+    estimate_iptw_ate,
+    estimate_difference_in_differences,
+    run_causal_sensitivity_analysis,
+    analyze_unmeasured_confounding_sensitivity,
+)
+
+
+def test_integration_all_six_causal_endpoints_registered():
+    """Verify that all six causal inference API endpoints are properly registered in FastAPI routes."""
+    openapi_schema = app.openapi()
+    paths = openapi_schema.get("paths", {})
+    expected_endpoints = [
+        "/api/causal/unadjusted-ate",
+        "/api/causal/regression-adjusted-ate",
+        "/api/causal/propensity-scores",
+        "/api/causal/iptw-ate",
+        "/api/causal/difference-in-differences",
+        "/api/causal/sensitivity-analysis",
+    ]
+    for endpoint in expected_endpoints:
+        assert endpoint in paths, f"Expected endpoint {endpoint} not found in registered routes."
+        assert "post" in paths[endpoint], f"Endpoint {endpoint} does not support POST method."
+
+
+def test_integration_all_six_endpoints_valid_response_structures(
+    example_causal_payload,
+    example_regression_causal_payload,
+    example_propensity_payload,
+    example_iptw_payload,
+    example_did_payload,
+    example_sensitivity_payload,
+):
+    """Verify that all six causal endpoints return valid 200 responses with documented top-level fields."""
+    endpoints_and_payloads = [
+        ("/api/causal/unadjusted-ate", example_causal_payload, ["estimator", "ate", "confidence_interval", "interpretation", "assumptions"]),
+        ("/api/causal/regression-adjusted-ate", example_regression_causal_payload, ["estimator", "adjusted_ate", "mean_predicted_treated", "model_features", "assumptions"]),
+        ("/api/causal/propensity-scores", example_propensity_payload, ["estimator", "propensity_scores", "overlap_diagnostics", "unadjusted_covariate_balance"]),
+        ("/api/causal/iptw-ate", example_iptw_payload, ["estimator", "iptw_ate", "weight_summary", "covariate_balance_before", "covariate_balance_after"]),
+        ("/api/causal/difference-in-differences", example_did_payload, ["estimator", "did_estimate", "cell_counts", "treatment_change", "control_change"]),
+        ("/api/causal/sensitivity-analysis", example_sensitivity_payload, ["reference_estimator", "reference_estimate", "estimator_comparisons", "assumptions"]),
+    ]
+    for route, payload, required_fields in endpoints_and_payloads:
+        response = client.post(route, json=payload)
+        assert response.status_code == 200, f"Endpoint {route} failed with status {response.status_code}: {response.text}"
+        data = response.json()
+        assert isinstance(data, dict), f"Endpoint {route} did not return a JSON dict."
+        for field in required_fields:
+            assert field in data, f"Required field '{field}' missing from {route} response."
+
+
+def test_integration_all_six_endpoints_reject_empty_payloads():
+    """Verify that sending empty JSON bodies to any of the six causal endpoints yields HTTP 422 with useful details."""
+    causal_routes = [
+        "/api/causal/unadjusted-ate",
+        "/api/causal/regression-adjusted-ate",
+        "/api/causal/propensity-scores",
+        "/api/causal/iptw-ate",
+        "/api/causal/difference-in-differences",
+        "/api/causal/sensitivity-analysis",
+    ]
+    for route in causal_routes:
+        response = client.post(route, json={})
+        assert response.status_code == 422, f"Endpoint {route} did not return 422 for empty payload, got {response.status_code}"
+        detail = response.json().get("detail")
+        assert detail is not None, f"Endpoint {route} response missing 'detail' field."
+
+
+def test_integration_error_responses_contain_no_stack_traces():
+    """Verify that invalid inputs and domain errors do not leak internal Python tracebacks or file paths."""
+    error_payloads = [
+        ("/api/causal/unadjusted-ate", {"data": [], "treatment_col": "t", "outcome_col": "y"}),
+        ("/api/causal/regression-adjusted-ate", {"data": [{"t": 1, "y": 10.0}], "treatment_col": "t", "outcome_col": "y", "confounder_cols": ["t"]}),
+        ("/api/causal/propensity-scores", {"data": [{"t": 1, "x": 1.0}, {"t": 1, "x": 2.0}], "treatment_col": "t", "confounder_cols": ["x"]}),
+        ("/api/causal/iptw-ate", {"data": [{"t": 1, "y": 1.0, "x": 1.0}], "treatment_col": "t", "outcome_col": "y", "confounder_cols": ["x"], "max_weight": -5.0}),
+        ("/api/causal/difference-in-differences", {"data": [{"t": 1, "time": 0, "y": 1.0}], "treatment_col": "t", "time_col": "time", "outcome_col": "y"}),
+        ("/api/causal/sensitivity-analysis", {"observed_estimate": 5.0, "bias_values": [1.0], "confidence_interval": [10.0, 5.0]}),
+    ]
+    for route, bad_payload in error_payloads:
+        response = client.post(route, json=bad_payload)
+        assert response.status_code == 422, f"Expected 422 from {route}, got {response.status_code}"
+        text_lower = response.text.lower()
+        assert "traceback (most recent call last)" not in text_lower, f"Stack trace leaked in {route}: {response.text}"
+        assert "causal_engine.py" not in text_lower, f"Internal file path leaked in {route}: {response.text}"
+
+
+def test_integration_non_interference_interleaved_calls(
+    example_causal_payload,
+    example_regression_causal_payload,
+    example_propensity_payload,
+    example_iptw_payload,
+    example_did_payload,
+    example_sensitivity_payload,
+):
+    """Verify that interleaved execution of different endpoints across multiple rounds produces identical, independent results."""
+    # Round 1
+    res1_r1 = client.post("/api/causal/unadjusted-ate", json=example_causal_payload).json()
+    res2_r1 = client.post("/api/causal/regression-adjusted-ate", json=example_regression_causal_payload).json()
+    res3_r1 = client.post("/api/causal/propensity-scores", json=example_propensity_payload).json()
+    res4_r1 = client.post("/api/causal/iptw-ate", json=example_iptw_payload).json()
+    res5_r1 = client.post("/api/causal/difference-in-differences", json=example_did_payload).json()
+    res6_r1 = client.post("/api/causal/sensitivity-analysis", json=example_sensitivity_payload).json()
+
+    # Round 2 (interleaved in reverse order)
+    res6_r2 = client.post("/api/causal/sensitivity-analysis", json=example_sensitivity_payload).json()
+    res5_r2 = client.post("/api/causal/difference-in-differences", json=example_did_payload).json()
+    res4_r2 = client.post("/api/causal/iptw-ate", json=example_iptw_payload).json()
+    res3_r2 = client.post("/api/causal/propensity-scores", json=example_propensity_payload).json()
+    res2_r2 = client.post("/api/causal/regression-adjusted-ate", json=example_regression_causal_payload).json()
+    res1_r2 = client.post("/api/causal/unadjusted-ate", json=example_causal_payload).json()
+
+    assert res1_r1["ate"] == pytest.approx(res1_r2["ate"])
+    assert res2_r1["adjusted_ate"] == pytest.approx(res2_r2["adjusted_ate"])
+    assert res3_r1["propensity_scores"] == pytest.approx(res3_r2["propensity_scores"])
+    assert res4_r1["iptw_ate"] == pytest.approx(res4_r2["iptw_ate"])
+    assert res5_r1["did_estimate"] == pytest.approx(res5_r2["did_estimate"])
+    assert res6_r1["reference_estimate"] == pytest.approx(res6_r2["reference_estimate"])
+
+
+def test_integration_engine_agreement_unadjusted_and_regression():
+    """Verify that unadjusted and regression-adjusted endpoints exactly match direct causal_engine outputs."""
+    records = [
+        {"treatment": 1, "outcome": 20.0, "x": 2.0},
+        {"treatment": 1, "outcome": 25.0, "x": 3.0},
+        {"treatment": 1, "outcome": 30.0, "x": 4.0},
+        {"treatment": 0, "outcome": 10.0, "x": 1.0},
+        {"treatment": 0, "outcome": 15.0, "x": 2.0},
+        {"treatment": 0, "outcome": 20.0, "x": 3.0},
+    ]
+    # Direct engine calls
+    engine_unadj = estimate_unadjusted_ate_with_uncertainty(
+        data=records, treatment_col="treatment", outcome_col="outcome"
+    )
+    engine_reg = estimate_regression_adjusted_ate(
+        data=records, treatment_col="treatment", outcome_col="outcome", confounder_cols=["x"]
+    )
+
+    # API calls
+    api_unadj = client.post("/api/causal/unadjusted-ate", json={
+        "data": records, "treatment_col": "treatment", "outcome_col": "outcome"
+    }).json()
+    api_reg = client.post("/api/causal/regression-adjusted-ate", json={
+        "data": records, "treatment_col": "treatment", "outcome_col": "outcome", "confounder_cols": ["x"]
+    }).json()
+
+    assert api_unadj["ate"] == pytest.approx(engine_unadj["ate"])
+    assert api_unadj["confidence_interval"] == pytest.approx(engine_unadj["confidence_interval"])
+    assert api_reg["adjusted_ate"] == pytest.approx(engine_reg["adjusted_ate"])
+    assert api_reg["mean_predicted_treated"] == pytest.approx(engine_reg["mean_predicted_treated"])
+
+
+def test_integration_engine_agreement_propensity_alignment():
+    """Verify that propensity scores returned by the API preserve exact element-wise observation alignment with the engine."""
+    records = [
+        {"treatment": 1, "x1": 2.5, "x2": 10.0},
+        {"treatment": 0, "x1": 1.5, "x2": 15.0},
+        {"treatment": 1, "x1": 3.0, "x2": 12.0},
+        {"treatment": 0, "x1": 2.0, "x2": 14.0},
+    ]
+    engine_res = estimate_propensity_scores(
+        data=records, treatment_col="treatment", confounder_cols=["x1", "x2"]
+    )
+    api_res = client.post("/api/causal/propensity-scores", json={
+        "data": records, "treatment_col": "treatment", "confounder_cols": ["x1", "x2"]
+    }).json()
+
+    assert len(api_res["propensity_scores"]) == len(records)
+    assert api_res["propensity_scores"] == pytest.approx(engine_res["propensity_scores"])
+    assert api_res["observation_indices"] == list(range(len(records)))
+
+
+def test_integration_engine_agreement_iptw_truncation():
+    """Verify that IPTW ATE endpoint matches direct engine calculations for both untruncated and truncated weights."""
+    records = [
+        {"treatment": 1, "outcome": 20.0, "x": 2.0},
+        {"treatment": 1, "outcome": 25.0, "x": 3.0},
+        {"treatment": 1, "outcome": 30.0, "x": 4.0},
+        {"treatment": 0, "outcome": 10.0, "x": 1.0},
+        {"treatment": 0, "outcome": 15.0, "x": 2.0},
+        {"treatment": 0, "outcome": 20.0, "x": 3.0},
+    ]
+    # Untruncated comparison
+    engine_untrunc = estimate_iptw_ate(
+        data=records, treatment_col="treatment", outcome_col="outcome", confounder_cols=["x"], truncate_weights=False
+    )
+    api_untrunc = client.post("/api/causal/iptw-ate", json={
+        "data": records, "treatment_col": "treatment", "outcome_col": "outcome", "confounder_cols": ["x"], "truncate_weights": False
+    }).json()
+
+    assert api_untrunc["iptw_ate"] == pytest.approx(engine_untrunc["iptw_ate"])
+    assert api_untrunc["ess_total"] == pytest.approx(engine_untrunc["ess_total"])
+
+    # Truncated comparison
+    engine_trunc = estimate_iptw_ate(
+        data=records, treatment_col="treatment", outcome_col="outcome", confounder_cols=["x"], truncate_weights=True, max_weight=2.0
+    )
+    api_trunc = client.post("/api/causal/iptw-ate", json={
+        "data": records, "treatment_col": "treatment", "outcome_col": "outcome", "confounder_cols": ["x"], "truncate_weights": True, "max_weight": 2.0
+    }).json()
+
+    assert api_trunc["iptw_ate"] == pytest.approx(engine_trunc["iptw_ate"])
+    assert api_trunc["weight_summary"]["weights_truncated_count"] == engine_trunc["weight_summary"]["weights_truncated_count"]
+    assert api_trunc["ess_total"] == pytest.approx(engine_trunc["ess_total"])
+
+
+def test_integration_engine_agreement_difference_in_differences():
+    """Verify that Difference-in-Differences endpoint matches direct engine calculations on 2x2 panel data."""
+    records = [
+        {"group": "treat", "period": "pre", "metric": 10.0},
+        {"group": "treat", "period": "post", "metric": 16.0},
+        {"group": "ctrl", "period": "pre", "metric": 8.0},
+        {"group": "ctrl", "period": "post", "metric": 11.0},
+    ]
+    engine_did = estimate_difference_in_differences(
+        data=records,
+        treatment_col="group",
+        time_col="period",
+        outcome_col="metric",
+        treated_value="treat",
+        control_value="ctrl",
+        pre_value="pre",
+        post_value="post",
+    )
+    api_did = client.post("/api/causal/difference-in-differences", json={
+        "data": records,
+        "treatment_col": "group",
+        "time_col": "period",
+        "outcome_col": "metric",
+        "treated_value": "treat",
+        "control_value": "ctrl",
+        "pre_value": "pre",
+        "post_value": "post",
+    }).json()
+
+    assert api_did["did_estimate"] == pytest.approx(engine_did["did_estimate"])
+    assert api_did["did_estimate"] == pytest.approx(3.0)
+    assert api_did["treatment_change"] == pytest.approx(engine_did["treatment_change"])
+    assert api_did["control_change"] == pytest.approx(engine_did["control_change"])
+    assert api_did["cell_counts"] == engine_did["cell_counts"]
+
+
+def test_integration_engine_agreement_sensitivity_all_modes():
+    """Verify that sensitivity analysis endpoint matches direct engine functions across dataset, standalone, and fallback modes."""
+    # 1. Dataset mode
+    records = [
+        {"t": 1, "y": 20.0, "x": 2.0},
+        {"t": 1, "y": 25.0, "x": 3.0},
+        {"t": 0, "y": 10.0, "x": 1.0},
+        {"t": 0, "y": 15.0, "x": 2.0},
+    ]
+    engine_data_mode = run_causal_sensitivity_analysis(
+        data=records, treatment_col="t", outcome_col="y", confounder_cols=["x"],
+        truncation_thresholds=[4.0], hypothetical_biases=[1.0, 2.0]
+    )
+    api_data_mode = client.post("/api/causal/sensitivity-analysis", json={
+        "data": records, "treatment_col": "t", "outcome_col": "y", "confounder_cols": ["x"],
+        "truncation_thresholds": [4.0], "hypothetical_biases": [1.0, 2.0]
+    }).json()
+
+    assert api_data_mode["reference_estimate"] == pytest.approx(engine_data_mode["reference_estimate"])
+    assert len(api_data_mode["bias_scenarios"]) == 2
+    assert api_data_mode["bias_scenarios"][0]["adjusted_estimate"] == pytest.approx(
+        engine_data_mode["unmeasured_confounding_analysis"]["bias_scenarios"][0]["adjusted_estimate"]
+    )
+
+    # 2. Standalone mode
+    engine_standalone = analyze_unmeasured_confounding_sensitivity(
+        observed_estimate=8.0, bias_values=[2.0, 4.0], confidence_interval=[6.0, 10.0]
+    )
+    api_standalone = client.post("/api/causal/sensitivity-analysis", json={
+        "observed_estimate": 8.0, "bias_values": [2.0, 4.0], "confidence_interval": [6.0, 10.0]
+    }).json()
+
+    assert api_standalone["observed_estimate"] == pytest.approx(engine_standalone["observed_estimate"])
+    assert api_standalone["bias_scenarios"][0]["adjusted_estimate"] == pytest.approx(
+        engine_standalone["bias_scenarios"][0]["adjusted_estimate"]
+    )
+    assert api_standalone["bias_scenarios"][0]["interval_includes_zero"] == engine_standalone["bias_scenarios"][0]["interval_includes_zero"]
+
+    # 3. Fallback mode (no confounders passed)
+    api_fallback = client.post("/api/causal/sensitivity-analysis", json={
+        "data": records, "treatment_col": "t", "outcome_col": "y", "confounder_cols": None, "reference_estimator": "regression_adjusted"
+    }).json()
+    assert api_fallback["reference_estimator"] == "unadjusted"
+    assert any("fell back to 'unadjusted'" in w for w in api_fallback["warnings"])
+
+
 
 
 
