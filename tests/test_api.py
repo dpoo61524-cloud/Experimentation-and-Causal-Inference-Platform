@@ -900,3 +900,292 @@ def test_bayesian_endpoint_validation_errors():
     res15 = client.post("/api/experiment/bayesian", json={"conversions_a": 10})
     assert res15.status_code == 422
 
+
+# --- Causal Inference: Unadjusted ATE Endpoint Tests ---
+
+@pytest.fixture
+def example_causal_payload():
+    return {
+        "data": [
+            {"treatment": 1, "outcome": 12},
+            {"treatment": 1, "outcome": 14},
+            {"treatment": 1, "outcome": 16},
+            {"treatment": 0, "outcome": 6},
+            {"treatment": 0, "outcome": 10},
+        ],
+        "treatment_col": "treatment",
+        "outcome_col": "outcome",
+        "treated_value": 1,
+        "untreated_value": 0,
+        "drop_missing": False,
+        "confidence_level": 0.95,
+    }
+
+
+def test_unadjusted_ate_example_dataset_success(example_causal_payload):
+    """Verify successful unadjusted ATE calculation on the example dataset."""
+    response = client.post("/api/causal/unadjusted-ate", json=example_causal_payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    # Core statistical expectations
+    assert data["estimator"] == "unadjusted_difference_in_means"
+    assert data["ate"] == pytest.approx(6.0)
+    assert data["mean_outcome_treated"] == pytest.approx(14.0)
+    assert data["mean_outcome_control"] == pytest.approx(8.0)
+    assert data["n_total"] == 5
+    assert data["n_treated"] == 3
+    assert data["n_control"] == 2
+    assert data["rows_dropped"] == 0
+
+    # Welch uncertainty and confidence interval
+    assert data["std_error"] == pytest.approx(2.309401, rel=1e-4)
+    assert data["degrees_of_freedom"] == pytest.approx(1.684211, rel=1e-4)
+    assert data["confidence_level"] == 0.95
+    assert "confidence_interval" in data
+    assert data["ci_lower"] is not None and data["ci_upper"] is not None
+
+    # Confidence interval centered on the point estimate
+    ci = data["confidence_interval"]
+    assert len(ci) == 2
+    ci_mid = (ci[0] + ci[1]) / 2.0
+    assert ci_mid == pytest.approx(data["ate"], abs=1e-6)
+    assert ci[0] == pytest.approx(data["ci_lower"])
+    assert ci[1] == pytest.approx(data["ci_upper"])
+
+    # Assumptions and interpretation
+    assert "assumptions" in data
+    assert "interpretation" in data
+    assert "traceback" not in response.text.lower()
+
+
+def test_unadjusted_ate_custom_confidence_level(example_causal_payload):
+    """Verify unadjusted ATE with a custom confidence level (0.90 vs 0.95)."""
+    payload_90 = {**example_causal_payload, "confidence_level": 0.90}
+    response_90 = client.post("/api/causal/unadjusted-ate", json=payload_90)
+    assert response_90.status_code == 200
+    data_90 = response_90.json()
+
+    assert data_90["confidence_level"] == 0.90
+    assert data_90["ate"] == pytest.approx(6.0)
+
+    # 90% interval must be narrower than 95% interval
+    response_95 = client.post("/api/causal/unadjusted-ate", json=example_causal_payload)
+    data_95 = response_95.json()
+
+    width_90 = data_90["ci_upper"] - data_90["ci_lower"]
+    width_95 = data_95["ci_upper"] - data_95["ci_lower"]
+    assert width_90 < width_95
+
+
+def test_unadjusted_ate_string_labels():
+    """Verify that custom string treatment labels work via the API."""
+    payload = {
+        "data": [
+            {"arm": "treated", "y": 20.0},
+            {"arm": "treated", "y": 25.0},
+            {"arm": "treated", "y": 30.0},
+            {"arm": "control", "y": 10.0},
+            {"arm": "control", "y": 15.0},
+        ],
+        "treatment_col": "arm",
+        "outcome_col": "y",
+        "treated_value": "treated",
+        "untreated_value": "control",
+    }
+    response = client.post("/api/causal/unadjusted-ate", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ate"] == pytest.approx(12.5)
+    assert data["mean_outcome_treated"] == pytest.approx(25.0)
+    assert data["mean_outcome_control"] == pytest.approx(12.5)
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ["data", "treatment_col", "outcome_col"]
+)
+def test_unadjusted_ate_missing_required_fields(example_causal_payload, missing_field):
+    """Verify that omitting required request fields returns HTTP 422."""
+    payload = {k: v for k, v in example_causal_payload.items() if k != missing_field}
+    response = client.post("/api/causal/unadjusted-ate", json=payload)
+    assert response.status_code == 422
+    assert "detail" in response.json()
+    assert "traceback" not in response.text.lower()
+
+
+@pytest.mark.parametrize(
+    "invalid_conf",
+    [0.0, 1.0, -0.05, 1.5, True, False, "invalid"]
+)
+def test_unadjusted_ate_invalid_confidence_level(example_causal_payload, invalid_conf):
+    """Verify that invalid confidence levels are rejected with HTTP 422."""
+    payload = {**example_causal_payload, "confidence_level": invalid_conf}
+    response = client.post("/api/causal/unadjusted-ate", json=payload)
+    assert response.status_code == 422
+    assert "detail" in response.json()
+    assert "traceback" not in response.text.lower()
+
+
+def test_unadjusted_ate_missing_treatment_column(example_causal_payload):
+    """Verify rejection when the specified treatment column is missing from data."""
+    payload = {**example_causal_payload, "treatment_col": "non_existent_column"}
+    response = client.post("/api/causal/unadjusted-ate", json=payload)
+    assert response.status_code == 422
+    data = response.json()
+    assert "detail" in data
+    assert "non_existent_column" in str(data["detail"])
+
+
+def test_unadjusted_ate_missing_outcome_column(example_causal_payload):
+    """Verify rejection when the specified outcome column is missing from data."""
+    payload = {**example_causal_payload, "outcome_col": "non_existent_column"}
+    response = client.post("/api/causal/unadjusted-ate", json=payload)
+    assert response.status_code == 422
+    data = response.json()
+    assert "detail" in data
+    assert "non_existent_column" in str(data["detail"])
+
+
+def test_unadjusted_ate_invalid_treatment_labels():
+    """Verify rejection when treatment column has non-binary categories or invalid labels."""
+    payload = {
+        "data": [
+            {"treatment": 0, "outcome": 10},
+            {"treatment": 1, "outcome": 15},
+            {"treatment": 2, "outcome": 20},
+        ],
+        "treatment_col": "treatment",
+        "outcome_col": "outcome",
+    }
+    response = client.post("/api/causal/unadjusted-ate", json=payload)
+    assert response.status_code == 422
+    assert "detail" in response.json()
+
+
+def test_unadjusted_ate_nonnumeric_outcomes():
+    """Verify rejection when outcome column contains non-numeric strings or booleans."""
+    payload_str = {
+        "data": [
+            {"treatment": 1, "outcome": "high"},
+            {"treatment": 1, "outcome": 14},
+            {"treatment": 0, "outcome": 6},
+            {"treatment": 0, "outcome": 10},
+        ],
+        "treatment_col": "treatment",
+        "outcome_col": "outcome",
+    }
+    res_str = client.post("/api/causal/unadjusted-ate", json=payload_str)
+    assert res_str.status_code == 422
+    assert "detail" in res_str.json()
+
+    payload_bool = {
+        "data": [
+            {"treatment": 1, "outcome": True},
+            {"treatment": 1, "outcome": False},
+            {"treatment": 0, "outcome": True},
+            {"treatment": 0, "outcome": False},
+        ],
+        "treatment_col": "treatment",
+        "outcome_col": "outcome",
+    }
+    res_bool = client.post("/api/causal/unadjusted-ate", json=payload_bool)
+    assert res_bool.status_code == 422
+    assert "detail" in res_bool.json()
+
+
+def test_unadjusted_ate_missing_outcomes_default_rejected():
+    """Verify rejection when missing outcome values are present with drop_missing=False."""
+    payload = {
+        "data": [
+            {"treatment": 1, "outcome": 12},
+            {"treatment": 1, "outcome": None},
+            {"treatment": 0, "outcome": 6},
+            {"treatment": 0, "outcome": 10},
+        ],
+        "treatment_col": "treatment",
+        "outcome_col": "outcome",
+        "drop_missing": False,
+    }
+    response = client.post("/api/causal/unadjusted-ate", json=payload)
+    assert response.status_code == 422
+    assert "detail" in response.json()
+    assert "missing" in str(response.json()["detail"]).lower()
+
+
+def test_unadjusted_ate_explicit_drop_missing():
+    """Verify that drop_missing=True drops rows and reports rows_dropped accurately."""
+    payload = {
+        "data": [
+            {"treatment": 1, "outcome": 12},
+            {"treatment": 1, "outcome": 14},
+            {"treatment": 1, "outcome": 16},
+            {"treatment": 0, "outcome": 6},
+            {"treatment": 0, "outcome": 10},
+            {"treatment": 1, "outcome": None},  # should be dropped
+            {"treatment": None, "outcome": 8},   # should be dropped
+        ],
+        "treatment_col": "treatment",
+        "outcome_col": "outcome",
+        "drop_missing": True,
+    }
+    response = client.post("/api/causal/unadjusted-ate", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["rows_dropped"] == 2
+    assert data["n_total"] == 5
+    assert data["n_treated"] == 3
+    assert data["n_control"] == 2
+    assert data["ate"] == pytest.approx(6.0)
+
+
+@pytest.mark.parametrize(
+    "malformed_data",
+    [
+        [],                    # empty list
+        "not_a_list",          # string
+        {"a": 1},              # dict instead of list
+        [1, 2, 3],             # list of non-dicts
+    ]
+)
+def test_unadjusted_ate_empty_or_malformed_datasets(malformed_data):
+    """Verify that empty or malformed dataset payloads are rejected with HTTP 422."""
+    payload = {
+        "data": malformed_data,
+        "treatment_col": "treatment",
+        "outcome_col": "outcome",
+    }
+    response = client.post("/api/causal/unadjusted-ate", json=payload)
+    assert response.status_code == 422
+    assert "detail" in response.json()
+
+
+def test_unadjusted_ate_single_group_or_insufficient_sample():
+    """Verify rejection when only one group is present or group size is insufficient."""
+    # Single treatment group
+    payload_single = {
+        "data": [
+            {"treatment": 1, "outcome": 10},
+            {"treatment": 1, "outcome": 12},
+            {"treatment": 1, "outcome": 14},
+        ],
+        "treatment_col": "treatment",
+        "outcome_col": "outcome",
+    }
+    res1 = client.post("/api/causal/unadjusted-ate", json=payload_single)
+    assert res1.status_code == 422
+
+    # n=1 in control group (insufficient for Welch variance calculation)
+    payload_small = {
+        "data": [
+            {"treatment": 1, "outcome": 10},
+            {"treatment": 1, "outcome": 12},
+            {"treatment": 0, "outcome": 8},
+        ],
+        "treatment_col": "treatment",
+        "outcome_col": "outcome",
+    }
+    res2 = client.post("/api/causal/unadjusted-ate", json=payload_small)
+    assert res2.status_code == 422
+
+

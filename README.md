@@ -586,6 +586,66 @@ pytest -v
 
 ---
 
+## Causal Inference API
+
+### Unadjusted Average Treatment Effect (ATE)
+- **URL**: `POST /api/causal/unadjusted-ate`
+- **Description**: Estimates the unadjusted Average Treatment Effect (difference in sample means) with two-sided Welch-style confidence intervals and Welch–Satterthwaite degrees of freedom.
+- **Request Parameters**:
+  - `data` (list of dicts, required): Tabular observations containing treatment and outcome values.
+  - `treatment_col` (string, required): Name of the binary treatment indicator column.
+  - `outcome_col` (string, required): Name of the numeric outcome column.
+  - `treated_value` (any, optional): Label identifying treated units (inferred if omitted).
+  - `untreated_value` (any, optional): Label identifying control units (inferred if omitted).
+  - `drop_missing` (boolean, optional, default `false`): Whether to drop rows with missing values across analysis columns.
+  - `confidence_level` (float, optional, default `0.95`): Two-sided confidence level strictly between 0 and 1.
+
+**Example Request**:
+```bash
+curl -X POST http://127.0.0.1:8000/api/causal/unadjusted-ate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "data": [
+      {"treatment": 1, "outcome": 12},
+      {"treatment": 1, "outcome": 14},
+      {"treatment": 1, "outcome": 16},
+      {"treatment": 0, "outcome": 6},
+      {"treatment": 0, "outcome": 10}
+    ],
+    "treatment_col": "treatment",
+    "outcome_col": "outcome",
+    "treated_value": 1,
+    "untreated_value": 0,
+    "drop_missing": false,
+    "confidence_level": 0.95
+  }'
+```
+
+**Example Response (200 OK)**:
+```json
+{
+  "estimator": "unadjusted_difference_in_means",
+  "ate": 6.0,
+  "mean_outcome_treated": 14.0,
+  "mean_outcome_control": 8.0,
+  "n_total": 5,
+  "n_treated": 3,
+  "n_control": 2,
+  "std_error": 2.3094,
+  "degrees_of_freedom": 1.6842,
+  "confidence_level": 0.95,
+  "ci_lower": -5.9540,
+  "ci_upper": 17.9540,
+  "confidence_interval": [-5.9540, 17.9540],
+  "margin_of_error": 11.9540,
+  "rows_dropped": 0,
+  "interpretation": "The 95% confidence interval [-5.9540, 17.9540] quantifies sampling uncertainty around the difference in means (6.0000)...",
+  "assumptions": "Unadjusted difference in means reflects the true Average Treatment Effect (ATE) only under randomized treatment assignment..."
+}
+```
+
+---
+
 ## Academic Viva & Exam Notes
 
 ### 1. What is the "peeking problem" in online A/B testing?

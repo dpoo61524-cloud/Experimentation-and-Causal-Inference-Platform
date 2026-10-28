@@ -26,6 +26,8 @@ from statistics_engine import (
     sequential_conversion_test,
 )
 from bayesian_engine import bayesian_ab_test
+from causal_engine import estimate_unadjusted_ate_with_uncertainty
+import numpy as np
 
 app = FastAPI(
     title="Experimentation and Causal Inference Platform API",
@@ -46,6 +48,23 @@ async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse
         status_code=status.HTTP_400_BAD_REQUEST,
         content={"detail": str(exc)},
     )
+
+
+def _sanitize_for_json(val: Any) -> Any:
+    """Recursively convert NumPy scalars and non-native types for clean JSON serialization."""
+    if isinstance(val, (np.integer,)):
+        return int(val)
+    if isinstance(val, (np.floating,)):
+        return float(val)
+    if isinstance(val, (np.bool_,)):
+        return bool(val)
+    if isinstance(val, (np.ndarray,)):
+        return val.tolist()
+    if isinstance(val, dict):
+        return {k: _sanitize_for_json(v) for k, v in val.items()}
+    if isinstance(val, list):
+        return [_sanitize_for_json(item) for item in val]
+    return val
 
 
 # --- Request and Response Schemas ---
@@ -842,6 +861,155 @@ async def run_bayesian_endpoint(
         )
 
 
+# --- Causal Inference Models & Endpoints ---
+
+class CausalUnadjustedATERequest(BaseModel):
+    data: List[Dict[str, Any]] = Field(
+        ...,
+        description="Tabular dataset as a list of observation record dictionaries.",
+        examples=[
+            [
+                {"treatment": 1, "outcome": 12},
+                {"treatment": 1, "outcome": 14},
+                {"treatment": 1, "outcome": 16},
+                {"treatment": 0, "outcome": 6},
+                {"treatment": 0, "outcome": 10},
+            ]
+        ],
+    )
+    treatment_col: str = Field(
+        ...,
+        description="Name of the binary treatment indicator column in the dataset.",
+        examples=["treatment"],
+    )
+    outcome_col: str = Field(
+        ...,
+        description="Name of the numeric outcome column in the dataset.",
+        examples=["outcome"],
+    )
+    treated_value: Optional[Any] = Field(
+        None,
+        description="Optional label identifying treated observations. Inferred automatically if omitted.",
+        examples=[1],
+    )
+    untreated_value: Optional[Any] = Field(
+        None,
+        description="Optional label identifying control/untreated observations. Inferred automatically if omitted.",
+        examples=[0],
+    )
+    drop_missing: bool = Field(
+        default=False,
+        description="Whether to explicitly drop rows with missing values across analysis columns. Default is false.",
+        examples=[False],
+    )
+    confidence_level: float = Field(
+        default=0.95,
+        description="Two-sided confidence level strictly between 0 and 1 (exclusive). Default is 0.95.",
+        examples=[0.95],
+    )
+
+    @field_validator("confidence_level")
+    @classmethod
+    def validate_confidence_level(cls, v: Any) -> float:
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError("confidence_level must be a numeric float strictly between 0 and 1.")
+        fv = float(v)
+        if math.isnan(fv) or math.isinf(fv) or not (0.0 < fv < 1.0):
+            raise ValueError("confidence_level must be strictly between 0 and 1 (exclusive).")
+        return fv
+
+    @field_validator("treatment_col", "outcome_col")
+    @classmethod
+    def validate_non_empty_column_name(cls, v: Any, info: Any) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError(f"{info.field_name} must be a non-empty string.")
+        return v.strip()
+
+    @field_validator("data")
+    @classmethod
+    def validate_data_list(cls, v: Any) -> List[Dict[str, Any]]:
+        if not isinstance(v, list):
+            raise ValueError("data must be a list of observation dictionaries.")
+        if len(v) == 0:
+            raise ValueError("data cannot be empty. Causal inference requires observations.")
+        for idx, row in enumerate(v):
+            if not isinstance(row, dict):
+                raise ValueError(f"Observation at index {idx} must be a dictionary, got {type(row).__name__}.")
+        return v
+
+
+class CausalUnadjustedATEResponse(BaseModel):
+    estimator: str = Field(..., description="Name of the estimator used")
+    ate: float = Field(..., description="Estimated Average Treatment Effect (difference in sample means)")
+    unadjusted_ate: float = Field(..., description="Alias for ate")
+    difference_in_means: float = Field(..., description="Alias for ate")
+    mean_outcome_treated: float = Field(..., description="Sample mean outcome of the treated group")
+    mean_outcome_control: float = Field(..., description="Sample mean outcome of the control/untreated group")
+    outcome_mean_treated: float = Field(..., description="Alias for mean_outcome_treated")
+    outcome_mean_untreated: float = Field(..., description="Alias for mean_outcome_control")
+    n_total: int = Field(..., description="Total number of observations evaluated")
+    n_treated: int = Field(..., description="Number of treated observations")
+    n_control: int = Field(..., description="Number of control/untreated observations")
+    n_untreated: int = Field(..., description="Alias for n_control")
+    treatment_col: str = Field(..., description="Name of the treatment column")
+    outcome_col: str = Field(..., description="Name of the outcome column")
+    confounder_cols: List[str] = Field(default_factory=list, description="Confounder column names (empty for unadjusted)")
+    treated_value: Any = Field(..., description="Resolved value representing the treated condition")
+    control_value: Any = Field(..., description="Resolved value representing the control condition")
+    untreated_value: Any = Field(..., description="Alias for control_value")
+    rows_dropped: int = Field(0, description="Number of rows dropped due to missing values")
+    assumptions: str = Field(..., description="Educational explanation of identifying assumptions and confounding limitations")
+    variance_treated: Optional[float] = Field(None, description="Sample variance of the treated group (ddof=1)")
+    variance_control: Optional[float] = Field(None, description="Sample variance of the control group (ddof=1)")
+    std_error: Optional[float] = Field(None, description="Welch standard error of the difference in means")
+    se: Optional[float] = Field(None, description="Alias for std_error")
+    degrees_of_freedom: Optional[float] = Field(None, description="Welch–Satterthwaite effective degrees of freedom")
+    df: Optional[float] = Field(None, description="Alias for degrees_of_freedom")
+    confidence_level: float = Field(..., description="Two-sided confidence level used")
+    t_critical: Optional[float] = Field(None, description="Student's t critical value")
+    critical_value: Optional[float] = Field(None, description="Alias for t_critical")
+    margin_of_error: Optional[float] = Field(None, description="Margin of error (t_critical * std_error)")
+    confidence_interval: Optional[List[float]] = Field(None, description="Confidence interval [ci_lower, ci_upper]")
+    ci_lower: Optional[float] = Field(None, description="Lower bound of the confidence interval")
+    ci_upper: Optional[float] = Field(None, description="Upper bound of the confidence interval")
+    confidence_interval_95: Optional[List[float]] = Field(None, description="95% confidence interval if confidence_level == 0.95")
+    interpretation: str = Field(..., description="Interpretation clarifying sampling variability vs causal claims")
+
+
+@app.post(
+    "/api/causal/unadjusted-ate",
+    response_model=CausalUnadjustedATEResponse,
+    tags=["Causal Inference"],
+    summary="Estimate unadjusted Average Treatment Effect (ATE)",
+)
+async def unadjusted_ate_endpoint(
+    payload: CausalUnadjustedATERequest,
+) -> Dict[str, Any]:
+    """Estimate the unadjusted Average Treatment Effect (ATE) with Welch-style confidence intervals.
+
+    Calculates the unadjusted difference in sample means between treated and control groups,
+    allowing for unequal population variances via Welch's standard error and Welch–Satterthwaite
+    degrees of freedom.
+    """
+    try:
+        results = estimate_unadjusted_ate_with_uncertainty(
+            data=payload.data,
+            treatment_col=payload.treatment_col,
+            outcome_col=payload.outcome_col,
+            treated_value=payload.treated_value,
+            untreated_value=payload.untreated_value,
+            drop_missing=payload.drop_missing,
+            confidence_level=payload.confidence_level,
+        )
+        return _sanitize_for_json(results)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=str(exc),
+        )
+
+
 if __name__ == "__main__":
     uvicorn.run("api:app", host="127.0.0.1", port=8000, reload=True)
+
 
