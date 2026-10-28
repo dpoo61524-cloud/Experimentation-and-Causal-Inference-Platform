@@ -39,6 +39,7 @@ import numpy as np
 import pandas as pd
 import scipy.stats as stats
 import statsmodels.api as sm
+import warnings
 
 
 def _to_dataframe(data: Any) -> pd.DataFrame:
@@ -1056,6 +1057,702 @@ def estimate_regression_adjusted_ate(
         "untreated_value": control_label,
         "rows_dropped": int(v["rows_dropped"]),
         "r_squared": r_squared,
+        "interpretation": interpretation_text,
+        "assumptions": assumptions_text,
+    }
+
+
+def compute_overlap_diagnostics(
+    propensity_scores: Sequence[float],
+    treatment: Sequence[Any],
+    treated_value: Any = 1,
+    control_value: Any = 0,
+    near_zero_threshold: float = 0.05,
+    near_one_threshold: float = 0.95,
+) -> Dict[str, Any]:
+    """Compute overlap and common support diagnostics for propensity scores.
+
+    Overlap (also known as the positivity assumption) requires that every individual in the
+    target population has a non-zero probability of receiving either treatment condition:
+        0 < P(Treatment = treated | X) < 1
+
+    When treatment assignment is near-deterministic (propensity scores near 0 or 1), or when
+    treated and control score ranges do not overlap, estimating counterfactual outcomes
+    requires severe model extrapolation. This diagnostic evaluates the empirical score distributions
+    across treatment groups to identify potential positivity violations.
+
+    Parameters:
+    -----------
+    propensity_scores : Sequence[float]
+        Sequence of estimated propensity scores P(Treatment = treated | X).
+    treatment : Sequence[Any]
+        Sequence of treatment group labels matching each propensity score.
+    treated_value : Any, default 1
+        Label identifying treated observations.
+    control_value : Any, default 0
+        Label identifying control observations.
+    near_zero_threshold : float, default 0.05
+        Threshold below which a propensity score is considered near zero.
+    near_one_threshold : float, default 0.95
+        Threshold above which a propensity score is considered near one.
+
+    Returns:
+    --------
+    Dict[str, Any]
+        Dictionary of overlap diagnostics containing:
+        - 'min_score': Global minimum propensity score.
+        - 'max_score': Global maximum propensity score.
+        - 'min_score_treated': Minimum score among treated units.
+        - 'max_score_treated': Maximum score among treated units.
+        - 'min_score_control': Minimum score among control units.
+        - 'max_score_control': Maximum score among control units.
+        - 'treated_range': [min_score_treated, max_score_treated].
+        - 'control_range': [min_score_control, max_score_control].
+        - 'common_support_range': [common_support_min, common_support_max] if overlap exists, else None.
+        - 'has_overlap': True if treated and control score ranges intersect, False otherwise.
+        - 'scores_near_zero': Total count of observations with score < near_zero_threshold.
+        - 'scores_near_one': Total count of observations with score > near_one_threshold.
+        - 'treated_near_zero': Count of treated observations with score < near_zero_threshold.
+        - 'treated_near_one': Count of treated observations with score > near_one_threshold.
+        - 'control_near_zero': Count of control observations with score < near_zero_threshold.
+        - 'control_near_one': Count of control observations with score > near_one_threshold.
+        - 'near_zero_threshold': The threshold used for near-zero detection.
+        - 'near_one_threshold': The threshold used for near-one detection.
+        - 'warning': Explanatory warning string if overlap is violated or extreme scores are present, else None.
+        - 'interpretation': Concise interpretation of the empirical overlap assessment.
+    """
+    if propensity_scores is None:
+        raise ValueError("propensity_scores cannot be None.")
+    if treatment is None:
+        raise ValueError("treatment cannot be None.")
+
+    try:
+        scores_arr = np.asarray(propensity_scores, dtype=float)
+    except Exception as exc:
+        raise ValueError(f"propensity_scores must contain numeric values: {exc}")
+
+    if scores_arr.ndim != 1 or len(scores_arr) == 0:
+        raise ValueError("propensity_scores must be a non-empty 1D sequence.")
+
+    if np.isnan(scores_arr).any() or np.isinf(scores_arr).any():
+        raise ValueError("propensity_scores contains NaN or infinite values.")
+
+    if (scores_arr < 0.0).any() or (scores_arr > 1.0).any():
+        raise ValueError("propensity_scores must lie in the valid probability interval [0, 1].")
+
+    t_arr = np.asarray(treatment)
+    if len(t_arr) != len(scores_arr):
+        raise ValueError(
+            f"Length mismatch: propensity_scores ({len(scores_arr)}) and treatment ({len(t_arr)}) "
+            "must have identical lengths."
+        )
+
+    treated_mask = (t_arr == treated_value)
+    control_mask = (t_arr == control_value)
+
+    n_treated = int(np.sum(treated_mask))
+    n_control = int(np.sum(control_mask))
+
+    if n_treated == 0:
+        raise ValueError(
+            f"No observations match treated_value={treated_value!r} in treatment array."
+        )
+    if n_control == 0:
+        raise ValueError(
+            f"No observations match control_value={control_value!r} in treatment array."
+        )
+
+    treated_scores = scores_arr[treated_mask]
+    control_scores = scores_arr[control_mask]
+
+    min_score = float(np.min(scores_arr))
+    max_score = float(np.max(scores_arr))
+
+    min_score_treated = float(np.min(treated_scores))
+    max_score_treated = float(np.max(treated_scores))
+    min_score_control = float(np.min(control_scores))
+    max_score_control = float(np.max(control_scores))
+
+    treated_range = [min_score_treated, max_score_treated]
+    control_range = [min_score_control, max_score_control]
+
+    # Check common support intersection
+    common_support_min = max(min_score_treated, min_score_control)
+    common_support_max = min(max_score_treated, max_score_control)
+    has_overlap = bool(common_support_min <= common_support_max)
+    common_support_range = (
+        [float(common_support_min), float(common_support_max)] if has_overlap else None
+    )
+
+    # Near-boundary counts
+    near_zero = float(near_zero_threshold)
+    near_one = float(near_one_threshold)
+
+    scores_near_zero = int(np.sum(scores_arr < near_zero))
+    scores_near_one = int(np.sum(scores_arr > near_one))
+    treated_near_zero = int(np.sum(treated_scores < near_zero))
+    treated_near_one = int(np.sum(treated_scores > near_one))
+    control_near_zero = int(np.sum(control_scores < near_zero))
+    control_near_one = int(np.sum(control_scores > near_one))
+
+    # Overlap warning formulation
+    warning: Optional[str] = None
+    if not has_overlap:
+        warning = (
+            "Severe overlap violation: Treated and control propensity score ranges are completely disjoint. "
+            f"Treated range is [{min_score_treated:.4f}, {max_score_treated:.4f}] while control range is "
+            f"[{min_score_control:.4f}, {max_score_control:.4f}]. Common support does not exist, so matching "
+            "or weighting cannot be performed without extreme parametric extrapolation."
+        )
+    elif scores_near_zero > 0 or scores_near_one > 0:
+        warning = (
+            f"Limited overlap warning: {scores_near_zero} score(s) are near zero (< {near_zero}) and "
+            f"{scores_near_one} score(s) are near one (> {near_one}). Near-deterministic treatment assignment "
+            "indicates poor positivity, which can cause extreme weights or unmatchable units in downstream analyses."
+        )
+
+    interpretation = (
+        f"Overlap diagnostic: {'Overlap exists' if has_overlap else 'No common support'}. "
+        f"Treated score range: [{min_score_treated:.4f}, {max_score_treated:.4f}], "
+        f"Control score range: [{min_score_control:.4f}, {max_score_control:.4f}]. "
+        f"Scores near boundaries: {scores_near_zero} near 0 (< {near_zero}), "
+        f"{scores_near_one} near 1 (> {near_one})."
+    )
+
+    return {
+        "min_score": min_score,
+        "max_score": max_score,
+        "min_score_treated": min_score_treated,
+        "max_score_treated": max_score_treated,
+        "min_score_control": min_score_control,
+        "max_score_control": max_score_control,
+        "treated_range": treated_range,
+        "control_range": control_range,
+        "common_support_range": common_support_range,
+        "has_overlap": has_overlap,
+        "scores_near_zero": scores_near_zero,
+        "scores_near_one": scores_near_one,
+        "treated_near_zero": treated_near_zero,
+        "treated_near_one": treated_near_one,
+        "control_near_zero": control_near_zero,
+        "control_near_one": control_near_one,
+        "near_zero_threshold": near_zero,
+        "near_one_threshold": near_one,
+        "warning": warning,
+        "interpretation": interpretation,
+    }
+
+
+def compute_unadjusted_covariate_balance(
+    data: pd.DataFrame,
+    treatment_col: str,
+    confounder_cols: Sequence[str],
+    treated_value: Any = 1,
+    control_value: Any = 0,
+) -> Dict[str, Dict[str, Any]]:
+    """Compute unadjusted Standardized Mean Differences (SMDs) for observed confounders.
+
+    Standardized Mean Difference (SMD) quantifies the magnitude of baseline covariate imbalance
+    between treated and control groups in units of pooled standard deviation:
+        SMD = (mean_treated - mean_control) / pooled_standard_deviation
+
+    where the pooled sample standard deviation is:
+        s_pooled = sqrt(((n_1 - 1)*s_1^2 + (n_0 - 1)*s_0^2) / (n_1 + n_0 - 2))
+
+    By convention in causal inference literature (e.g. Austin 2009), an absolute SMD < 0.10
+    is commonly considered indicative of acceptable balance, whereas larger values indicate
+    substantial baseline confounding.
+
+    Note: This function evaluates UNADJUSTED balance only. Post-adjustment balance (e.g. after
+    matching or inverse-probability weighting) will be evaluated in subsequent tasks.
+
+    Parameters:
+    -----------
+    data : pd.DataFrame
+        Tabular dataset containing treatment and confounder columns.
+    treatment_col : str
+        Name of the binary treatment column.
+    confounder_cols : Sequence[str]
+        List of observed confounder column names to evaluate.
+    treated_value : Any, default 1
+        Label identifying treated observations.
+    control_value : Any, default 0
+        Label identifying control observations.
+
+    Returns:
+    --------
+    Dict[str, Dict[str, Any]]
+        Dictionary keyed by confounder column name, with balance statistics for each variable:
+        - 'covariate': Column name
+        - 'covariate_type': 'numeric' or 'categorical'
+        - 'mean_treated': Sample mean of treated group (numeric only)
+        - 'mean_control': Sample mean of control group (numeric only)
+        - 'std_treated': Sample standard deviation of treated group (numeric only)
+        - 'std_control': Sample standard deviation of control group (numeric only)
+        - 'pooled_std': Pooled sample standard deviation (numeric only)
+        - 'smd': Standardized Mean Difference (float or None)
+        - 'abs_smd': Absolute Standardized Mean Difference (float or None)
+        - 'zero_pooled_variance': Boolean indicating whether pooled variance is zero
+        - 'is_balanced': True if abs(smd) <= 0.10, False otherwise (None for categorical/undefined)
+        - 'note': Educational or diagnostic note (e.g. for zero pooled variance or categorical variables)
+    """
+    if data is None or not isinstance(data, pd.DataFrame):
+        raise ValueError("data must be a pandas DataFrame.")
+    if treatment_col not in data.columns:
+        raise ValueError(f"treatment_col '{treatment_col}' not found in data.")
+
+    t_series = data[treatment_col]
+    treated_mask = (t_series == treated_value)
+    control_mask = (t_series == control_value)
+
+    n_1 = int(np.sum(treated_mask))
+    n_0 = int(np.sum(control_mask))
+
+    if n_1 == 0 or n_0 == 0:
+        raise ValueError("Data must contain both treated and control observations for balance calculation.")
+
+    balance_dict: Dict[str, Dict[str, Any]] = {}
+
+    for col in confounder_cols:
+        if col not in data.columns:
+            raise ValueError(f"Confounder column '{col}' not found in data.")
+
+        series = data[col]
+        # Check if column is numeric
+        is_numeric = pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series)
+
+        if not is_numeric:
+            balance_dict[col] = {
+                "covariate": col,
+                "covariate_type": "categorical",
+                "mean_treated": None,
+                "mean_control": None,
+                "std_treated": None,
+                "std_control": None,
+                "pooled_std": None,
+                "smd": None,
+                "abs_smd": None,
+                "zero_pooled_variance": False,
+                "is_balanced": None,
+                "note": (
+                    "Standardized mean difference is designed for numeric covariates. "
+                    "Categorical covariate balance is deferred to the subsequent matching/weighting module."
+                ),
+            }
+            continue
+
+        x1 = series[treated_mask].astype(float).values
+        x0 = series[control_mask].astype(float).values
+
+        m_1 = float(np.mean(x1))
+        m_0 = float(np.mean(x0))
+
+        v_1 = float(np.var(x1, ddof=1)) if len(x1) > 1 else 0.0
+        v_0 = float(np.var(x0, ddof=1)) if len(x0) > 1 else 0.0
+
+        s_1 = float(np.sqrt(v_1))
+        s_0 = float(np.sqrt(v_0))
+
+        df_pooled = (len(x1) - 1) + (len(x0) - 1)
+        if df_pooled > 0:
+            pooled_var = ((len(x1) - 1) * v_1 + (len(x0) - 1) * v_0) / df_pooled
+            pooled_std = float(np.sqrt(max(0.0, pooled_var)))
+        else:
+            pooled_std = 0.0
+
+        if pooled_std > 0.0:
+            smd = float((m_1 - m_0) / pooled_std)
+            abs_smd = float(abs(smd))
+            zero_pooled_var = False
+            is_balanced = bool(abs_smd <= 0.10)
+            note = None
+        else:
+            zero_pooled_var = True
+            if m_1 == m_0:
+                smd = 0.0
+                abs_smd = 0.0
+                is_balanced = True
+                note = (
+                    "Zero pooled variance: covariate values are identical across both treatment groups; "
+                    "standardized mean difference is 0.0."
+                )
+            else:
+                smd = None
+                abs_smd = None
+                is_balanced = False
+                note = (
+                    "Zero pooled variance with differing group means: within-group variation is zero, "
+                    "so standardized mean difference is mathematically undefined."
+                )
+
+        balance_dict[col] = {
+            "covariate": col,
+            "covariate_type": "numeric",
+            "mean_treated": m_1,
+            "mean_control": m_0,
+            "std_treated": s_1,
+            "std_control": s_0,
+            "pooled_std": pooled_std,
+            "smd": smd,
+            "abs_smd": abs_smd,
+            "zero_pooled_variance": zero_pooled_var,
+            "is_balanced": is_balanced,
+            "note": note,
+        }
+
+    return balance_dict
+
+
+def estimate_propensity_scores(
+    data: Any,
+    treatment_col: str,
+    confounder_cols: Optional[Sequence[str]] = None,
+    outcome_col: Optional[str] = None,
+    treated_value: Optional[Any] = None,
+    untreated_value: Optional[Any] = None,
+    control_value: Optional[Any] = None,
+    drop_missing: bool = False,
+    near_zero_threshold: float = 0.05,
+    near_one_threshold: float = 0.95,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Estimate propensity scores and compute overlap and balance diagnostics.
+
+    The propensity score is defined as the conditional probability of receiving treatment
+    given observed baseline confounders:
+        e(X) = P(Treatment = treated | X)
+
+    In observational studies, individuals who receive treatment typically differ systematically
+    from those who do not (treatment selection bias). By summarizing multi-dimensional observed
+    confounders into a single scalar probability, propensity scores facilitate assessing common
+    support (positivity) and covariate balance before estimating treatment effects.
+
+    Methodology:
+    ------------
+    1. Validates tabular data, binary treatment labels, and non-empty confounder lists
+       by reusing the core validation foundation (`validate_causal_data`).
+    2. Encodes numeric confounders as continuous floats and categorical confounders via
+       one-hot encoding (`drop_first=True`) to maintain a consistent design matrix.
+    3. Fits a binary logistic regression model (`statsmodels.api.Logit`) to estimate
+       conditional treatment assignment probabilities.
+    4. Evaluates empirical common support and overlap diagnostics across treatment groups,
+       identifying near-deterministic assignment (scores near 0 or 1).
+    5. Calculates baseline unadjusted Standardized Mean Differences (SMDs) for numeric
+       confounders to establish pre-adjustment imbalance.
+
+    Important Causal Limitations:
+    -----------------------------
+    - Propensity scores are ESTIMATED probabilities, not known true assignment mechanisms.
+    - Propensity score estimation ALONE does NOT estimate a treatment effect. Treatment effect
+      estimation requires subsequent methods such as matching, weighting, or stratification.
+    - Propensity score methods adjust ONLY for observed, modeled confounders. They CANNOT
+      correct for unmeasured confounding.
+    - If overlap is poor or absent (lack of common support), treatment effect estimation
+      relies heavily on parametric extrapolation and may produce unstable results.
+    - Scores are NEVER silently clipped or modified in this function.
+
+    Parameters:
+    -----------
+    data : Any
+        Tabular dataset (pandas DataFrame, dictionary of columns, or list of dicts).
+    treatment_col : str
+        Name of the binary treatment column.
+    confounder_cols : Sequence[str], optional
+        List of observed confounder column names used to model treatment assignment.
+        Must contain at least one confounder column.
+    outcome_col : str, optional
+        Optional outcome column name. If provided, outcome validity is verified according
+        to existing validator conventions.
+    treated_value : Any, optional
+        Label identifying treated observations. If None, inferred automatically.
+    untreated_value : Any, optional
+        Label identifying control observations. If None, inferred automatically.
+    control_value : Any, optional
+        Alias for untreated_value.
+    drop_missing : bool, default False
+        Explicit missing data policy:
+        - False (default): raises ValueError if any missing values are found.
+        - True: explicitly drops rows containing missing values and records rows_dropped.
+    near_zero_threshold : float, default 0.05
+        Threshold below which a score is flagged as near-zero.
+    near_one_threshold : float, default 0.95
+        Threshold above which a score is flagged as near-one.
+
+    Returns:
+    --------
+    Dict[str, Any]
+        Structured dictionary containing:
+        - 'estimator': 'logistic_propensity_score'
+        - 'propensity_scores': List of estimated probabilities P(T=1 | X) for each validated observation
+        - 'scores': Alias for 'propensity_scores'
+        - 'observation_indices': List of original dataset row indices corresponding to each score
+        - 'scores_by_index': Dict mapping original row index to estimated propensity score
+        - 'n_total': Total number of validated observations
+        - 'n_treated': Number of treated observations
+        - 'n_control': Number of control observations
+        - 'n_untreated': Alias for 'n_control'
+        - 'treatment_col': Treatment column name
+        - 'confounder_cols': List of confounder column names
+        - 'numeric_confounders': List of numeric confounder column names
+        - 'categorical_confounders': List of categorical confounder column names
+        - 'treated_value': Value representing the treated condition
+        - 'control_value': Value representing the control condition
+        - 'untreated_value': Alias for 'control_value'
+        - 'rows_dropped': Number of rows dropped due to missing data (0 if drop_missing=False)
+        - 'model_features': List of features included in the logistic regression design matrix
+        - 'model_coefficients': Dict mapping feature names to estimated logistic regression coefficients
+        - 'model_metadata': Metadata including convergence status, pseudo-R2, and optimization warnings
+        - 'overlap_diagnostics': Comprehensive overlap and common support diagnostic dictionary
+        - 'unadjusted_covariate_balance': Dictionary of baseline SMDs for confounders
+        - 'covariate_balance': Alias for 'unadjusted_covariate_balance'
+        - 'balance_assessment_type': 'unadjusted'
+        - 'post_adjustment_balance_note': Explanation that post-adjustment balance is evaluated in subsequent tasks
+        - 'categorical_balance_note': Statement regarding categorical confounder balance
+        - 'interpretation': Concise interpretation of score distribution and overlap
+        - 'assumptions': Educational statement on causal assumptions, positivity, and limitations
+
+    Raises:
+    -------
+    ValueError:
+        If confounders are missing or empty, data validation fails, treatment is non-binary,
+        sample size is insufficient for the number of model parameters, or the logistic regression
+        model cannot be fit.
+    """
+    # 1. Flexible argument resolution
+    actual_outcome_col = outcome_col
+    actual_confounder_cols = confounder_cols
+
+    if isinstance(confounder_cols, str) and isinstance(outcome_col, (list, tuple)):
+        actual_outcome_col = confounder_cols
+        actual_confounder_cols = outcome_col
+
+    if control_value is not None and untreated_value is None:
+        untreated_value = control_value
+    if treated_value is None and "treatment_value" in kwargs:
+        treated_value = kwargs["treatment_value"]
+
+    # 2. Confounder list validation
+    if actual_confounder_cols is None:
+        raise ValueError(
+            "Propensity score estimation requires at least one confounder column. "
+            "Confounder list cannot be None."
+        )
+    if not isinstance(actual_confounder_cols, (list, tuple)):
+        raise ValueError(
+            f"confounder_cols must be a list or tuple of column names, got {type(actual_confounder_cols).__name__}."
+        )
+    if len(actual_confounder_cols) == 0:
+        raise ValueError(
+            "Propensity score estimation requires at least one confounder column. "
+            "Confounder list cannot be empty."
+        )
+
+    # 3. Reuse validate_causal_data
+    if actual_outcome_col is not None:
+        v = validate_causal_data(
+            data=data,
+            treatment_col=treatment_col,
+            outcome_col=actual_outcome_col,
+            confounder_cols=actual_confounder_cols,
+            treated_value=treated_value,
+            untreated_value=untreated_value,
+            drop_missing=drop_missing,
+        )
+    else:
+        df_raw = _to_dataframe(data)
+        dummy_col = "__dummy_outcome__"
+        while dummy_col in df_raw.columns:
+            dummy_col += "_"
+        df_with_dummy = df_raw.copy()
+        df_with_dummy[dummy_col] = 1.0
+
+        v = validate_causal_data(
+            data=df_with_dummy,
+            treatment_col=treatment_col,
+            outcome_col=dummy_col,
+            confounder_cols=actual_confounder_cols,
+            treated_value=treated_value,
+            untreated_value=untreated_value,
+            drop_missing=drop_missing,
+        )
+
+    df_validated = v["validated_data"]
+    if actual_outcome_col is None and dummy_col in df_validated.columns:
+        df_validated = df_validated.drop(columns=[dummy_col])
+
+    treated_label = v["treated_value"]
+    control_label = v["untreated_value"]
+    treatment_series = df_validated[v["treatment_col"]]
+    t_binary = (treatment_series == treated_label).astype(float)
+
+    clean_confounders = v["confounder_cols"]
+    numeric_confounders = v["numeric_confounders"]
+    categorical_confounders = v["categorical_confounders"]
+
+    # 4. Preprocessing confounders (One-Hot Encoding for Categoricals with drop_first=True)
+    confounders_df = df_validated[clean_confounders].copy()
+    if categorical_confounders:
+        X_conf = pd.get_dummies(
+            confounders_df,
+            columns=categorical_confounders,
+            drop_first=True,
+            dtype=float,
+        )
+    else:
+        X_conf = confounders_df.astype(float)
+
+    X_design = sm.add_constant(X_conf, prepend=True, has_constant="add")
+
+    n_obs = len(df_validated)
+    n_features = X_design.shape[1]
+
+    if n_obs < n_features:
+        raise ValueError(
+            f"Insufficient observations to fit propensity score model: "
+            f"dataset contains {n_obs} observation(s), but model requires at least {n_features} "
+            f"observations for {n_features} parameters (including intercept and confounders)."
+        )
+
+    n_t = int(np.sum(t_binary == 1.0))
+    n_c = int(np.sum(t_binary == 0.0))
+    if n_t == 0 or n_c == 0:
+        raise ValueError(
+            "Propensity score estimation requires observations in both treatment groups "
+            f"(got {n_t} treated, {n_c} control)."
+        )
+
+    # 5. Fit Logistic Regression Model
+    warning_msgs: List[str] = []
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            logit_model = sm.Logit(t_binary, X_design)
+            logit_res = logit_model.fit(disp=False)
+            for cw in caught:
+                cname = cw.category.__name__
+                if "PerfectSeparation" in cname:
+                    warning_msgs.append(
+                        "Perfect separation or quasi-complete separation detected in covariate space."
+                    )
+                elif "Convergence" in cname:
+                    warning_msgs.append(
+                        "Optimization algorithm failed to achieve standard likelihood convergence."
+                    )
+    except Exception as exc:
+        raise ValueError(f"Failed to fit propensity score model (logistic regression): {exc}")
+
+    if np.isnan(logit_res.params).any():
+        raise ValueError(
+            "Propensity score model fitting resulted in NaN coefficients (likely due to severe collinearity or rank deficiency)."
+        )
+
+    # 6. Predict Propensity Scores
+    pred_scores = logit_res.predict(X_design)
+    scores_array = np.asarray(pred_scores, dtype=float)
+
+    if np.isnan(scores_array).any() or np.isinf(scores_array).any():
+        raise ValueError("Propensity score model produced non-finite predicted probabilities.")
+    if (scores_array < 0.0).any() or (scores_array > 1.0).any():
+        raise ValueError("Propensity score model produced probabilities outside the valid [0, 1] interval.")
+
+    # 7. Model Metadata
+    converged = bool(getattr(logit_res, "mle_retvals", {}).get("converged", True))
+    if not converged and not any("converge" in m.lower() for m in warning_msgs):
+        warning_msgs.append("Model did not converge within the maximum iterations.")
+
+    pseudo_r2 = (
+        float(logit_res.prsquared)
+        if hasattr(logit_res, "prsquared") and logit_res.prsquared is not None and not np.isnan(logit_res.prsquared)
+        else None
+    )
+
+    model_metadata = {
+        "model_type": "LogisticRegression (sm.Logit)",
+        "converged": converged,
+        "n_iterations": int(getattr(logit_res, "mle_retvals", {}).get("iterations", 0)),
+        "pseudo_r2": pseudo_r2,
+        "features": list(X_design.columns),
+        "coefficients": {str(k): float(v) for k, v in logit_res.params.items()},
+        "warnings": warning_msgs,
+    }
+
+    # 8. Overlap and Balance Diagnostics
+    overlap_diag = compute_overlap_diagnostics(
+        propensity_scores=scores_array,
+        treatment=t_binary,
+        treated_value=1.0,
+        control_value=0.0,
+        near_zero_threshold=near_zero_threshold,
+        near_one_threshold=near_one_threshold,
+    )
+
+    covar_balance = compute_unadjusted_covariate_balance(
+        data=df_validated,
+        treatment_col=v["treatment_col"],
+        confounder_cols=clean_confounders,
+        treated_value=treated_label,
+        control_value=control_label,
+    )
+
+    # 9. Educational Assumptions and Limitations
+    assumptions_text = (
+        "Propensity score estimation models the conditional probability of treatment assignment "
+        "P(Treatment = treated | X) using observed confounders. Key identification assumptions "
+        "for subsequent causal inference include: (1) Positivity / Common Support (0 < P(T=1 | X=x) < 1 "
+        "for all x in the target population); (2) No Unmeasured Confounding ((Y(1), Y(0)) ⫫ T | X); and "
+        "(3) Correct Model Specification for the assignment mechanism. "
+        "Critical limitation: Propensity scores are ESTIMATED probabilities and adjust only for "
+        "observed, modeled covariates. Propensity score estimation alone does NOT estimate a treatment "
+        "effect or remove unmeasured confounding."
+    )
+
+    interpretation_text = (
+        f"Estimated propensity scores for {len(scores_array)} observations using {len(clean_confounders)} confounder(s). "
+        f"Propensity scores range from {overlap_diag['min_score']:.4f} to {overlap_diag['max_score']:.4f} "
+        f"(treated: [{overlap_diag['min_score_treated']:.4f}, {overlap_diag['max_score_treated']:.4f}], "
+        f"control: [{overlap_diag['min_score_control']:.4f}, {overlap_diag['max_score_control']:.4f}]). "
+        f"Common support overlap: {'Present' if overlap_diag['has_overlap'] else 'Violated'}. "
+        f"Scores near extreme boundaries: {overlap_diag['scores_near_zero']} near 0 (< {near_zero_threshold}), "
+        f"{overlap_diag['scores_near_one']} near 1 (> {near_one_threshold})."
+    )
+
+    scores_list = [float(s) for s in scores_array]
+    indices_list = list(df_validated.index)
+    scores_by_idx = {idx: score for idx, score in zip(indices_list, scores_list)}
+
+    return {
+        "estimator": "logistic_propensity_score",
+        "propensity_scores": scores_list,
+        "scores": scores_list,
+        "observation_indices": indices_list,
+        "scores_by_index": scores_by_idx,
+        "n_total": int(v["n_total"]),
+        "n_treated": int(v["n_treated"]),
+        "n_control": int(v["n_untreated"]),
+        "n_untreated": int(v["n_untreated"]),
+        "treatment_col": v["treatment_col"],
+        "confounder_cols": clean_confounders,
+        "numeric_confounders": numeric_confounders,
+        "categorical_confounders": categorical_confounders,
+        "treated_value": treated_label,
+        "control_value": control_label,
+        "untreated_value": control_label,
+        "rows_dropped": int(v["rows_dropped"]),
+        "model_features": list(X_design.columns),
+        "model_coefficients": {str(k): float(v) for k, v in logit_res.params.items()},
+        "model_metadata": model_metadata,
+        "overlap_diagnostics": overlap_diag,
+        "unadjusted_covariate_balance": covar_balance,
+        "covariate_balance": covar_balance,
+        "balance_assessment_type": "unadjusted",
+        "post_adjustment_balance_note": (
+            "Post-adjustment balance is not evaluated in this task because matching and weighting "
+            "are not yet applied. Balance improvement will be assessed in the subsequent matching/weighting module."
+        ),
+        "categorical_balance_note": (
+            "Categorical confounder balance assessment (e.g. difference in proportions) is deferred "
+            "to the subsequent matching/weighting module."
+        ),
         "interpretation": interpretation_text,
         "assumptions": assumptions_text,
     }

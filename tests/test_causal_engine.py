@@ -15,6 +15,9 @@ from causal_engine import (
     estimate_unadjusted_ate,
     estimate_unadjusted_ate_with_uncertainty,
     estimate_regression_adjusted_ate,
+    compute_overlap_diagnostics,
+    compute_unadjusted_covariate_balance,
+    estimate_propensity_scores,
 )
 
 
@@ -1125,3 +1128,323 @@ def test_regression_adjusted_ate_differs_from_unadjusted_under_confounding():
     # Disclaimers present in output
     assert "unmeasured confounding" in res["assumptions"].lower()
     assert "counterfactual" in res["interpretation"].lower()
+
+
+# ============================================================================
+# 10. Propensity Score Estimation and Diagnostics Tests (Task 5.5)
+# ============================================================================
+
+def test_propensity_score_deterministic_synthetic_dataset():
+    """Verify that propensity scores on deterministic data are finite and strictly within [0, 1]."""
+    df = pd.DataFrame({
+        "t": [1, 1, 1, 1, 0, 0, 0, 0],
+        "x1": [2.0, 3.0, 2.5, 3.5, 0.5, 1.0, 1.2, 0.8],
+        "x2": [10.0, 12.0, 11.0, 13.0, 5.0, 6.0, 7.0, 5.5],
+    })
+
+    res = estimate_propensity_scores(
+        data=df,
+        treatment_col="t",
+        confounder_cols=["x1", "x2"],
+    )
+
+    assert res["estimator"] == "logistic_propensity_score"
+    scores = res["propensity_scores"]
+    assert len(scores) == 8
+    assert all(np.isfinite(s) for s in scores)
+    assert all(0.0 <= s <= 1.0 for s in scores)
+    # Treated units have higher x1/x2 so their mean propensity score should exceed control
+    treated_scores = [scores[i] for i in range(4)]
+    control_scores = [scores[i] for i in range(4, 8)]
+    assert np.mean(treated_scores) > np.mean(control_scores)
+    # Ensure no treatment effect is returned
+    assert "ate" not in res
+    assert "adjusted_ate" not in res
+
+
+def test_propensity_score_returned_count_and_indices():
+    """Verify correct number of returned scores and preservation of original row indices."""
+    custom_index = ["row_a", "row_b", "row_c", "row_d", "row_e", "row_f"]
+    df = pd.DataFrame(
+        {
+            "treatment": [1, 0, 1, 0, 1, 0],
+            "age": [25, 45, 30, 50, 35, 55],
+        },
+        index=custom_index,
+    )
+
+    res = estimate_propensity_scores(
+        data=df,
+        treatment_col="treatment",
+        confounder_cols=["age"],
+    )
+
+    assert len(res["propensity_scores"]) == 6
+    assert res["observation_indices"] == custom_index
+    assert set(res["scores_by_index"].keys()) == set(custom_index)
+    for idx in custom_index:
+        assert isinstance(res["scores_by_index"][idx], float)
+        assert 0.0 <= res["scores_by_index"][idx] <= 1.0
+
+
+def test_propensity_score_group_counts_and_score_summaries():
+    """Verify that sample counts and subgroup score summaries match expected values."""
+    df = pd.DataFrame({
+        "treated": [1] * 5 + [0] * 3,
+        "covar": [10, 12, 14, 16, 18, 5, 7, 9],
+    })
+
+    res = estimate_propensity_scores(
+        data=df,
+        treatment_col="treated",
+        confounder_cols=["covar"],
+    )
+
+    assert res["n_total"] == 8
+    assert res["n_treated"] == 5
+    assert res["n_control"] == 3
+    assert res["n_untreated"] == 3
+
+    diag = res["overlap_diagnostics"]
+    assert diag["min_score"] <= diag["max_score"]
+    assert diag["min_score_treated"] <= diag["max_score_treated"]
+    assert diag["min_score_control"] <= diag["max_score_control"]
+
+
+def test_propensity_score_numeric_confounders():
+    """Verify propensity score estimation with multiple continuous numeric confounders."""
+    df = pd.DataFrame({
+        "t": [1, 0, 1, 0, 1, 0, 1, 0],
+        "income": [50000, 30000, 60000, 35000, 55000, 32000, 65000, 38000],
+        "education": [16, 12, 18, 12, 16, 14, 18, 14],
+        "tenure": [5.2, 1.1, 7.0, 2.3, 4.5, 1.8, 6.1, 3.0],
+    })
+
+    res = estimate_propensity_scores(
+        data=df,
+        treatment_col="t",
+        confounder_cols=["income", "education", "tenure"],
+    )
+
+    assert res["numeric_confounders"] == ["income", "education", "tenure"]
+    assert "income" in res["covariate_balance"]
+    assert "education" in res["covariate_balance"]
+    assert "tenure" in res["covariate_balance"]
+    assert set(res["model_features"]) == {"const", "income", "education", "tenure"}
+
+
+def test_propensity_score_categorical_confounders():
+    """Verify that categorical confounders are one-hot encoded and properly included in model features."""
+    df = pd.DataFrame({
+        "treatment": [1, 0, 1, 0, 1, 0, 1, 0],
+        "num_covar": [10, 5, 12, 6, 11, 7, 13, 8],
+        "region": ["North", "South", "East", "North", "East", "South", "North", "South"],
+    })
+
+    res = estimate_propensity_scores(
+        data=df,
+        treatment_col="treatment",
+        confounder_cols=["num_covar", "region"],
+    )
+
+    assert res["numeric_confounders"] == ["num_covar"]
+    assert res["categorical_confounders"] == ["region"]
+    # Check that dummy columns for region are generated with drop_first=True
+    model_features = res["model_features"]
+    assert "const" in model_features
+    assert "num_covar" in model_features
+    assert any("region_" in f for f in model_features)
+
+
+def test_propensity_score_custom_treatment_labels():
+    """Verify estimation using explicit custom string treatment and control labels."""
+    df = pd.DataFrame({
+        "group": ["Drug_Active", "Drug_Active", "Drug_Active", "Placebo", "Placebo", "Placebo"],
+        "severity": [3.5, 4.0, 4.5, 1.5, 2.0, 2.5],
+    })
+
+    res = estimate_propensity_scores(
+        data=df,
+        treatment_col="group",
+        confounder_cols=["severity"],
+        treated_value="Drug_Active",
+        control_value="Placebo",
+    )
+
+    assert res["treated_value"] == "Drug_Active"
+    assert res["control_value"] == "Placebo"
+    assert res["untreated_value"] == "Placebo"
+    assert res["n_treated"] == 3
+    assert res["n_control"] == 3
+
+
+def test_propensity_score_missing_confounder_columns():
+    """Verify ValueError when requested confounder columns are absent from the dataset."""
+    df = pd.DataFrame({"t": [1, 0, 1, 0], "covar": [1, 2, 3, 4]})
+    with pytest.raises(ValueError, match="Confounder column 'nonexistent' not found in dataset"):
+        estimate_propensity_scores(df, "t", ["covar", "nonexistent"])
+
+
+def test_propensity_score_empty_confounder_lists_rejected():
+    """Verify that missing or empty confounder specifications raise clear errors."""
+    df = pd.DataFrame({"t": [1, 0, 1, 0], "covar": [1, 2, 3, 4]})
+
+    with pytest.raises(ValueError, match="requires at least one confounder column"):
+        estimate_propensity_scores(df, "t", confounder_cols=None)
+
+    with pytest.raises(ValueError, match="requires at least one confounder column"):
+        estimate_propensity_scores(df, "t", confounder_cols=[])
+
+    with pytest.raises(ValueError, match="requires at least one confounder column"):
+        estimate_propensity_scores(df, "t", confounder_cols=())
+
+
+def test_propensity_score_invalid_treatment_values():
+    """Verify rejection of non-binary treatment columns."""
+    df_ternary = pd.DataFrame({"t": [0, 1, 2, 0, 1, 2], "covar": [1, 2, 3, 4, 5, 6]})
+    with pytest.raises(ValueError, match="must be binary"):
+        estimate_propensity_scores(df_ternary, "t", ["covar"])
+
+
+def test_propensity_score_missing_data_policy():
+    """Verify that drop_missing=False rejects missing values while drop_missing=True drops rows and tracks count."""
+    df_missing = pd.DataFrame({
+        "t": [1, 1, 0, 0, 1, 0],
+        "x": [10.0, np.nan, 20.0, 25.0, 15.0, 30.0],
+    })
+
+    # Default policy: raise ValueError
+    with pytest.raises(ValueError, match="Dataset contains missing values"):
+        estimate_propensity_scores(df_missing, "t", ["x"], drop_missing=False)
+
+    # Explicit policy: drop missing row
+    res = estimate_propensity_scores(df_missing, "t", ["x"], drop_missing=True)
+    assert res["rows_dropped"] == 1
+    assert res["n_total"] == 5
+    assert len(res["propensity_scores"]) == 5
+
+
+def test_propensity_score_constant_confounders_and_insufficient_sample_sizes():
+    """Verify rejection of zero-variance confounders and insufficient sample sizes."""
+    # Constant confounder (zero variance across all units)
+    df_const = pd.DataFrame({"t": [1, 1, 0, 0], "const_x": [42, 42, 42, 42]})
+    with pytest.raises(ValueError, match="has zero variance"):
+        estimate_propensity_scores(df_const, "t", ["const_x"])
+
+    # Insufficient observations: 2 observations for 3 parameters (const + 2 confounders)
+    df_few = pd.DataFrame({"t": [1, 0], "x1": [1.0, 2.0], "x2": [3.0, 4.0]})
+    with pytest.raises(ValueError, match="Insufficient observations to fit propensity score model"):
+        estimate_propensity_scores(df_few, "t", ["x1", "x2"])
+
+
+def test_overlap_diagnostics_overlapping_and_separated_synthetic_scores():
+    """Verify compute_overlap_diagnostics on deliberately overlapping and clearly separated synthetic scores."""
+    # Case 1: Overlapping scores
+    treated_overlap = [0.3, 0.4, 0.5, 0.6, 0.7]
+    control_overlap = [0.2, 0.35, 0.45, 0.55, 0.65]
+    scores_overlap = treated_overlap + control_overlap
+    t_overlap = [1] * len(treated_overlap) + [0] * len(control_overlap)
+
+    diag_overlap = compute_overlap_diagnostics(scores_overlap, t_overlap, treated_value=1, control_value=0)
+    assert diag_overlap["has_overlap"] is True
+    assert diag_overlap["common_support_range"] == [0.3, 0.65]
+    assert diag_overlap["scores_near_zero"] == 0
+    assert diag_overlap["scores_near_one"] == 0
+    assert diag_overlap["warning"] is None
+
+    # Case 2: Clearly separated scores (severe overlap violation)
+    treated_separated = [0.96, 0.98, 0.99]
+    control_separated = [0.01, 0.02, 0.03]
+    scores_sep = treated_separated + control_separated
+    t_sep = [1] * len(treated_separated) + [0] * len(control_separated)
+
+    diag_sep = compute_overlap_diagnostics(scores_sep, t_sep, treated_value=1, control_value=0)
+    assert diag_sep["has_overlap"] is False
+    assert diag_sep["common_support_range"] is None
+    assert diag_sep["scores_near_zero"] == 3
+    assert diag_sep["scores_near_one"] == 3
+    assert diag_sep["warning"] is not None
+    assert "overlap" in diag_sep["warning"].lower()
+
+
+def test_covariate_balance_numeric_smd_hand_calculated_example():
+    """Verify numeric Standardized Mean Difference (SMD) against a hand-calculated example.
+
+    Hand-calculated values:
+    - Treated: [12.0, 14.0, 16.0], n1 = 3
+      Mean = 14.0, Sample Var s1^2 = ((12-14)^2 + 0 + (16-14)^2) / 2 = 8 / 2 = 4.0
+    - Control: [8.0, 10.0, 12.0], n0 = 3
+      Mean = 10.0, Sample Var s0^2 = ((8-10)^2 + 0 + (12-10)^2) / 2 = 8 / 2 = 4.0
+    - Pooled sample variance:
+      s_pooled^2 = (2 * 4.0 + 2 * 4.0) / 4 = 16.0 / 4 = 4.0
+      s_pooled = sqrt(4.0) = 2.0
+    - Standardized Mean Difference:
+      SMD = (14.0 - 10.0) / 2.0 = 2.0
+    """
+    df = pd.DataFrame({
+        "t": [1, 1, 1, 0, 0, 0],
+        "x": [12.0, 14.0, 16.0, 8.0, 10.0, 12.0],
+    })
+
+    balance = compute_unadjusted_covariate_balance(
+        data=df,
+        treatment_col="t",
+        confounder_cols=["x"],
+        treated_value=1,
+        control_value=0,
+    )
+
+    x_stats = balance["x"]
+    assert x_stats["mean_treated"] == pytest.approx(14.0)
+    assert x_stats["mean_control"] == pytest.approx(10.0)
+    assert x_stats["std_treated"] == pytest.approx(2.0)
+    assert x_stats["std_control"] == pytest.approx(2.0)
+    assert x_stats["pooled_std"] == pytest.approx(2.0)
+    assert x_stats["smd"] == pytest.approx(2.0)
+    assert x_stats["abs_smd"] == pytest.approx(2.0)
+    assert x_stats["zero_pooled_variance"] is False
+    assert x_stats["is_balanced"] is False
+
+
+def test_covariate_balance_zero_pooled_variance_handling():
+    """Verify explicit handling of zero pooled variance for constant covariates."""
+    # Subcase A: Constant identical across both groups (mean difference is 0)
+    df_identical = pd.DataFrame({
+        "t": [1, 1, 1, 0, 0, 0],
+        "x": [5.0, 5.0, 5.0, 5.0, 5.0, 5.0],
+    })
+    balance_a = compute_unadjusted_covariate_balance(df_identical, "t", ["x"])
+    assert balance_a["x"]["pooled_std"] == 0.0
+    assert balance_a["x"]["zero_pooled_variance"] is True
+    assert balance_a["x"]["smd"] == 0.0
+    assert balance_a["x"]["note"] is not None
+
+    # Subcase B: Constant within each group but differing across groups (mean difference != 0)
+    df_differing = pd.DataFrame({
+        "t": [1, 1, 1, 0, 0, 0],
+        "x": [10.0, 10.0, 10.0, 5.0, 5.0, 5.0],
+    })
+    balance_b = compute_unadjusted_covariate_balance(df_differing, "t", ["x"])
+    assert balance_b["x"]["pooled_std"] == 0.0
+    assert balance_b["x"]["zero_pooled_variance"] is True
+    assert balance_b["x"]["smd"] is None
+    assert balance_b["x"]["note"] is not None
+    assert "mathematically undefined" in balance_b["x"]["note"].lower()
+
+
+def test_propensity_score_reproducibility_and_finite_outputs():
+    """Verify that repeated estimation on deterministic data produces identical, finite outputs."""
+    df = pd.DataFrame({
+        "treatment": [1, 1, 1, 0, 0, 0],
+        "covar1": [1.5, 2.5, 3.5, 1.2, 2.2, 3.2],
+        "covar2": [10.0, 12.0, 14.0, 8.0, 9.0, 11.0],
+    })
+
+    res1 = estimate_propensity_scores(df, "treatment", ["covar1", "covar2"])
+    res2 = estimate_propensity_scores(df, "treatment", ["covar1", "covar2"])
+
+    assert res1["propensity_scores"] == pytest.approx(res2["propensity_scores"])
+    assert res1["model_features"] == res2["model_features"]
+    assert res1["observation_indices"] == res2["observation_indices"]
+    assert res1["overlap_diagnostics"]["min_score"] == pytest.approx(res2["overlap_diagnostics"]["min_score"])
+    assert "unmeasured confounding" in res1["assumptions"].lower()
