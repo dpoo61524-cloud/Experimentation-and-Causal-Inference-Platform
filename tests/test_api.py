@@ -2621,6 +2621,423 @@ def test_causal_all_five_endpoints_coexist(
     assert res5.json()["estimator"] == "difference_in_differences"
 
 
+# ---------------------------------------------------------------------------
+# Causal Sensitivity Analysis and Robustness Checks Tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def example_sensitivity_payload():
+    """Valid tabular dataset fixture suitable for multi-estimator comparison and sensitivity analysis."""
+    records = [
+        {"treatment": 1, "outcome": 20.0, "x": 2.0},
+        {"treatment": 1, "outcome": 25.0, "x": 3.0},
+        {"treatment": 1, "outcome": 30.0, "x": 4.0},
+        {"treatment": 0, "outcome": 10.0, "x": 1.0},
+        {"treatment": 0, "outcome": 15.0, "x": 2.0},
+        {"treatment": 0, "outcome": 20.0, "x": 3.0},
+    ]
+    return {
+        "data": records,
+        "treatment_col": "treatment",
+        "outcome_col": "outcome",
+        "confounder_cols": ["x"],
+        "reference_estimator": "regression_adjusted",
+    }
+
+
+def test_sensitivity_endpoint_default_success(example_sensitivity_payload):
+    """Verify successful sensitivity analysis with default parameters."""
+    response = client.post("/api/causal/sensitivity-analysis", json=example_sensitivity_payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["reference_estimator"] == "regression_adjusted"
+    assert isinstance(data["reference_estimate"], float)
+    assert data["observed_estimate"] == pytest.approx(data["reference_estimate"])
+
+    # Estimator comparisons
+    comparisons = data["estimator_comparisons"]
+    assert "unadjusted" in comparisons
+    assert "regression_adjusted" in comparisons
+    assert "iptw" in comparisons
+    assert comparisons["unadjusted"]["available"] is True
+    assert comparisons["regression_adjusted"]["available"] is True
+    assert comparisons["iptw"]["available"] is True
+
+    # Weight truncation and unmeasured confounding default status
+    assert data["iptw_truncation_analysis"]["status"] == "not_requested"
+    assert data["unmeasured_confounding_analysis"]["status"] == "not_requested"
+    assert "interpretation" in data
+    assert "assumptions" in data
+
+
+def test_sensitivity_endpoint_with_truncation_thresholds(example_sensitivity_payload):
+    """Verify that specifying truncation thresholds returns evaluated truncation scenarios."""
+    payload = {
+        **example_sensitivity_payload,
+        "truncation_thresholds": [10.0, 3.0],
+    }
+    response = client.post("/api/causal/sensitivity-analysis", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    trunc = data["iptw_truncation_analysis"]
+    assert trunc["status"] == "evaluated"
+    assert len(trunc["scenarios"]) == 2
+    assert trunc["scenarios"][0]["threshold"] == 10.0
+    assert trunc["scenarios"][1]["threshold"] == 3.0
+    assert "estimate" in trunc["scenarios"][0]
+    assert "weights_truncated_count" in trunc["scenarios"][0]
+    assert "ess_total" in trunc["scenarios"][0]
+
+
+def test_sensitivity_endpoint_with_hypothetical_biases(example_sensitivity_payload):
+    """Verify that hypothetical bias scenarios are evaluated and adjusted estimates match formula."""
+    payload = {
+        **example_sensitivity_payload,
+        "hypothetical_biases": [1.0, 2.0, -1.0],
+    }
+    response = client.post("/api/causal/sensitivity-analysis", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    ref_est = data["reference_estimate"]
+    assert data["bias_scenarios"] is not None
+    assert len(data["bias_scenarios"]) == 3
+
+    # Check tau_adjusted = tau_observed - b
+    scenarios = data["bias_scenarios"]
+    assert scenarios[0]["hypothetical_bias"] == 1.0
+    assert scenarios[0]["adjusted_estimate"] == pytest.approx(ref_est - 1.0)
+    assert scenarios[1]["hypothetical_bias"] == 2.0
+    assert scenarios[1]["adjusted_estimate"] == pytest.approx(ref_est - 2.0)
+    assert scenarios[2]["hypothetical_bias"] == -1.0
+    assert scenarios[2]["adjusted_estimate"] == pytest.approx(ref_est - (-1.0))
+
+
+def test_sensitivity_endpoint_reference_estimator_selection(example_sensitivity_payload):
+    """Verify that reference_estimator can be set to iptw or unadjusted."""
+    # IPTW reference
+    payload_iptw = {**example_sensitivity_payload, "reference_estimator": "iptw"}
+    res_iptw = client.post("/api/causal/sensitivity-analysis", json=payload_iptw)
+    assert res_iptw.status_code == 200
+    data_iptw = res_iptw.json()
+    assert data_iptw["reference_estimator"] == "iptw"
+    assert data_iptw["estimator_comparisons"]["iptw"]["difference_from_reference"] == pytest.approx(0.0)
+
+    # Unadjusted reference
+    payload_unadj = {**example_sensitivity_payload, "reference_estimator": "unadjusted"}
+    res_unadj = client.post("/api/causal/sensitivity-analysis", json=payload_unadj)
+    assert res_unadj.status_code == 200
+    data_unadj = res_unadj.json()
+    assert data_unadj["reference_estimator"] == "unadjusted"
+    assert data_unadj["estimator_comparisons"]["unadjusted"]["difference_from_reference"] == pytest.approx(0.0)
+
+
+def test_sensitivity_endpoint_fallback_when_confounders_omitted(example_sensitivity_payload):
+    """Verify that when confounders are omitted, reference falls back to unadjusted with warnings."""
+    payload = {
+        "data": example_sensitivity_payload["data"],
+        "treatment_col": "treatment",
+        "outcome_col": "outcome",
+        "confounder_cols": None,
+        "reference_estimator": "regression_adjusted",
+    }
+    response = client.post("/api/causal/sensitivity-analysis", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["reference_estimator"] == "unadjusted"
+    assert any("fell back to 'unadjusted'" in w for w in data["warnings"])
+    assert data["estimator_comparisons"]["regression_adjusted"]["available"] is False
+    assert data["estimator_comparisons"]["iptw"]["available"] is False
+
+
+def test_sensitivity_endpoint_standalone_observed_estimate_success():
+    """Verify standalone unmeasured confounding sensitivity analysis when data is omitted."""
+    payload = {
+        "observed_estimate": 5.0,
+        "bias_values": [2.0, -2.0, 0.0],
+        "confidence_interval": [3.0, 7.0],
+    }
+    response = client.post("/api/causal/sensitivity-analysis", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["observed_estimate"] == pytest.approx(5.0)
+    assert data["confidence_interval"] == [3.0, 7.0]
+    assert len(data["bias_scenarios"]) == 3
+
+    # Scenario 1: bias=2.0 -> adjusted=3.0, CI=[1.0, 5.0], zero crossing=False
+    s1 = data["bias_scenarios"][0]
+    assert s1["hypothetical_bias"] == 2.0
+    assert s1["adjusted_estimate"] == pytest.approx(3.0)
+    assert s1["adjusted_confidence_interval"] == pytest.approx([1.0, 5.0])
+    assert s1["interval_includes_zero"] is False
+
+    # Scenario 2: bias=-2.0 -> adjusted=7.0, CI=[5.0, 9.0], zero crossing=False
+    s2 = data["bias_scenarios"][1]
+    assert s2["hypothetical_bias"] == -2.0
+    assert s2["adjusted_estimate"] == pytest.approx(7.0)
+    assert s2["adjusted_confidence_interval"] == pytest.approx([5.0, 9.0])
+    assert s2["interval_includes_zero"] is False
+
+    # Scenario 3: bias=0.0 -> adjusted=5.0, CI=[3.0, 7.0], zero crossing=False
+    s3 = data["bias_scenarios"][2]
+    assert s3["hypothetical_bias"] == 0.0
+    assert s3["adjusted_estimate"] == pytest.approx(5.0)
+    assert s3["adjusted_confidence_interval"] == pytest.approx([3.0, 7.0])
+    assert s3["interval_includes_zero"] is False
+
+
+def test_sensitivity_endpoint_standalone_interval_crosses_zero():
+    """Verify detection when adjusted confidence interval spans zero."""
+    payload = {
+        "observed_estimate": 2.0,
+        "bias_values": [2.0],
+        "confidence_interval": [1.0, 3.0],
+    }
+    response = client.post("/api/causal/sensitivity-analysis", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    s = data["bias_scenarios"][0]
+    assert s["adjusted_estimate"] == pytest.approx(0.0)
+    assert s["adjusted_confidence_interval"] == pytest.approx([-1.0, 1.0])
+    assert s["interval_includes_zero"] is True
+
+
+def test_sensitivity_endpoint_standalone_single_bias_value():
+    """Verify that a single numeric float bias_values works in standalone mode."""
+    payload = {
+        "observed_estimate": 4.0,
+        "bias_values": 1.5,
+    }
+    response = client.post("/api/causal/sensitivity-analysis", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["bias_scenarios"]) == 1
+    assert data["bias_scenarios"][0]["adjusted_estimate"] == pytest.approx(2.5)
+
+
+def test_sensitivity_endpoint_custom_labels():
+    """Verify that custom treated_value and control_value work in dataset mode."""
+    data = [
+        {"grp": "treatment", "outcome": 20.0, "x": 2.0},
+        {"grp": "treatment", "outcome": 25.0, "x": 3.0},
+        {"grp": "treatment", "outcome": 30.0, "x": 4.0},
+        {"grp": "control", "outcome": 10.0, "x": 1.0},
+        {"grp": "control", "outcome": 15.0, "x": 2.0},
+        {"grp": "control", "outcome": 20.0, "x": 3.0},
+    ]
+    payload = {
+        "data": data,
+        "treatment_col": "grp",
+        "outcome_col": "outcome",
+        "confounder_cols": ["x"],
+        "treated_value": "treatment",
+        "control_value": "control",
+    }
+    response = client.post("/api/causal/sensitivity-analysis", json=payload)
+    assert response.status_code == 200
+    assert response.json()["reference_estimator"] == "regression_adjusted"
+
+
+# Validation and error handling tests
+
+def test_sensitivity_endpoint_empty_body():
+    """Verify rejection with HTTP 422 when an empty request body is submitted."""
+    response = client.post("/api/causal/sensitivity-analysis", json={})
+    assert response.status_code == 422
+    assert "either 'data'" in str(response.json()["detail"]).lower()
+
+
+def test_sensitivity_endpoint_empty_data():
+    """Verify rejection with HTTP 422 when data is an empty list."""
+    payload = {"data": [], "treatment_col": "t", "outcome_col": "y"}
+    response = client.post("/api/causal/sensitivity-analysis", json=payload)
+    assert response.status_code == 422
+    assert "cannot be empty" in str(response.json()["detail"]).lower()
+
+
+def test_sensitivity_endpoint_missing_columns_when_data_provided():
+    """Verify rejection with HTTP 422 when treatment_col or outcome_col is missing."""
+    records = [{"t": 1, "y": 10.0}, {"t": 0, "y": 5.0}]
+    # Missing treatment_col
+    res1 = client.post("/api/causal/sensitivity-analysis", json={"data": records, "outcome_col": "y"})
+    assert res1.status_code == 422
+    assert "treatment_col" in str(res1.json()["detail"]).lower()
+
+    # Missing outcome_col
+    res2 = client.post("/api/causal/sensitivity-analysis", json={"data": records, "treatment_col": "t"})
+    assert res2.status_code == 422
+    assert "outcome_col" in str(res2.json()["detail"]).lower()
+
+
+def test_sensitivity_endpoint_conflicting_column_roles():
+    """Verify rejection with HTTP 422 when treatment_col, outcome_col, or confounder_cols conflict."""
+    records = [{"t": 1, "y": 10.0, "x": 2.0}, {"t": 0, "y": 5.0, "x": 1.0}]
+    # treatment_col == outcome_col
+    res1 = client.post(
+        "/api/causal/sensitivity-analysis",
+        json={"data": records, "treatment_col": "t", "outcome_col": "t"},
+    )
+    assert res1.status_code == 422
+    assert "cannot be the same column" in str(res1.json()["detail"]).lower()
+
+    # treatment_col in confounder_cols
+    res2 = client.post(
+        "/api/causal/sensitivity-analysis",
+        json={"data": records, "treatment_col": "t", "outcome_col": "y", "confounder_cols": ["t"]},
+    )
+    assert res2.status_code == 422
+    assert "treatment_col" in str(res2.json()["detail"]).lower()
+
+
+def test_sensitivity_endpoint_unsupported_reference_estimator(example_sensitivity_payload):
+    """Verify rejection with HTTP 422 when an unsupported reference_estimator is requested."""
+    payload = {
+        **example_sensitivity_payload,
+        "reference_estimator": "random_forest",
+    }
+    response = client.post("/api/causal/sensitivity-analysis", json=payload)
+    assert response.status_code == 422
+    assert "unsupported reference_estimator" in str(response.json()["detail"]).lower()
+
+
+@pytest.mark.parametrize(
+    "invalid_thresh",
+    [
+        [-1.0],
+        [0.0],
+        [-0.01],
+        [],
+        [True],
+        ["high"],
+    ],
+)
+def test_sensitivity_endpoint_invalid_truncation_thresholds(example_sensitivity_payload, invalid_thresh):
+    """Verify rejection with HTTP 422 for non-positive, empty, or boolean thresholds."""
+    payload = {
+        **example_sensitivity_payload,
+        "truncation_thresholds": invalid_thresh,
+    }
+    response = client.post("/api/causal/sensitivity-analysis", json=payload)
+    assert response.status_code == 422
+
+
+def test_sensitivity_endpoint_standalone_missing_biases():
+    """Verify rejection with HTTP 422 in standalone mode when bias_values is omitted."""
+    payload = {"observed_estimate": 5.0}
+    response = client.post("/api/causal/sensitivity-analysis", json=payload)
+    assert response.status_code == 422
+    assert "bias_values" in str(response.json()["detail"]).lower()
+
+
+def test_sensitivity_endpoint_standalone_empty_biases():
+    """Verify rejection with HTTP 422 in standalone mode when bias_values is empty list."""
+    payload = {"observed_estimate": 5.0, "bias_values": []}
+    response = client.post("/api/causal/sensitivity-analysis", json=payload)
+    assert response.status_code == 422
+    assert "empty" in str(response.json()["detail"]).lower()
+
+
+@pytest.mark.parametrize(
+    "invalid_ci",
+    [
+        [10.0, 5.0],      # lower > upper
+        [1.0, 2.0, 3.0],  # len != 2
+        [1.0],            # len != 2
+        ["not_a_number", 5.0],
+        [True, 5.0],
+    ],
+)
+def test_sensitivity_endpoint_standalone_invalid_ci(invalid_ci):
+    """Verify rejection with HTTP 422 when confidence_interval bounds are reversed or malformed."""
+    payload = {
+        "observed_estimate": 5.0,
+        "bias_values": [1.0],
+        "confidence_interval": invalid_ci,
+    }
+    response = client.post("/api/causal/sensitivity-analysis", json=payload)
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "invalid_est",
+    [
+        "five",
+        "nan",
+        "infinity",
+        True,
+    ],
+)
+def test_sensitivity_endpoint_standalone_invalid_observed_estimate(invalid_est):
+    """Verify rejection with HTTP 422 when observed_estimate is non-numeric or boolean."""
+    payload = {
+        "observed_estimate": invalid_est,
+        "bias_values": [1.0],
+    }
+    response = client.post("/api/causal/sensitivity-analysis", json=payload)
+    assert response.status_code == 422
+
+
+def test_sensitivity_endpoint_missing_values_rejected_by_default(example_sensitivity_payload):
+    """Verify rejection when missing values are present with drop_missing=False."""
+    bad_data = [dict(row) for row in example_sensitivity_payload["data"]]
+    bad_data[0]["outcome"] = None
+    payload = {**example_sensitivity_payload, "data": bad_data, "drop_missing": False}
+    response = client.post("/api/causal/sensitivity-analysis", json=payload)
+    assert response.status_code == 422
+    assert "missing" in str(response.json()["detail"]).lower()
+
+
+def test_sensitivity_endpoint_explicit_drop_missing(example_sensitivity_payload):
+    """Verify that drop_missing=True drops rows and succeeds."""
+    dirty_data = [dict(row) for row in example_sensitivity_payload["data"]]
+    dirty_data.append({"treatment": 1, "outcome": None, "x": 3.0})
+    dirty_data.append({"treatment": None, "outcome": 20.0, "x": 2.0})
+
+    payload = {**example_sensitivity_payload, "data": dirty_data, "drop_missing": True}
+    response = client.post("/api/causal/sensitivity-analysis", json=payload)
+    assert response.status_code == 200
+    assert response.json()["reference_estimator"] == "regression_adjusted"
+
+
+def test_causal_all_six_endpoints_coexist(
+    example_causal_payload,
+    example_regression_causal_payload,
+    example_propensity_payload,
+    example_iptw_payload,
+    example_did_payload,
+    example_sensitivity_payload,
+):
+    """Verify that all six causal inference API endpoints coexist and operate without regressions."""
+    res1 = client.post("/api/causal/unadjusted-ate", json=example_causal_payload)
+    assert res1.status_code == 200
+    assert res1.json()["estimator"] == "unadjusted_difference_in_means"
+
+    res2 = client.post("/api/causal/regression-adjusted-ate", json=example_regression_causal_payload)
+    assert res2.status_code == 200
+    assert res2.json()["estimator"] == "regression_adjusted_ate"
+
+    res3 = client.post("/api/causal/propensity-scores", json=example_propensity_payload)
+    assert res3.status_code == 200
+    assert res3.json()["estimator"] == "logistic_propensity_score"
+
+    res4 = client.post("/api/causal/iptw-ate", json=example_iptw_payload)
+    assert res4.status_code == 200
+    assert res4.json()["estimator"] == "iptw_ate"
+
+    res5 = client.post("/api/causal/difference-in-differences", json=example_did_payload)
+    assert res5.status_code == 200
+    assert res5.json()["estimator"] == "difference_in_differences"
+
+    res6 = client.post("/api/causal/sensitivity-analysis", json=example_sensitivity_payload)
+    assert res6.status_code == 200
+    assert res6.json()["reference_estimator"] == "regression_adjusted"
+
+
 
 
 

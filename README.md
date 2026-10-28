@@ -14,7 +14,7 @@ A Python platform for A/B testing, causal inference, and statistical analysis, f
 - **Sample Size Estimation**: Power analysis (`NormalIndPower`) to determine required sample size per group and total sample size given baseline rate, expected rate, alpha, and power.
 - **Multiple Comparisons Corrections**: Family-wise error rate control using Bonferroni and Benjamini-Hochberg (FDR) adjustments.
 - **Automated Experiment Reporting**: Human-readable terminal output and CSV exports of experiment findings.
-- **FastAPI REST API**: High-performance backend endpoints exposing statistical testing, power analysis, and causal inference engines (unadjusted ATE with Welch CIs, regression-adjusted ATE via G-computation, propensity score estimation and overlap diagnostics, IPTW treatment effect estimation with covariate balance and ESS diagnostics, and Difference-in-Differences treatment effect estimation), complete with input validation and interactive OpenAPI documentation.
+- **FastAPI REST API**: High-performance backend endpoints exposing statistical testing, power analysis, and causal inference engines (unadjusted ATE with Welch CIs, regression-adjusted ATE via G-computation, propensity score estimation and overlap diagnostics, IPTW treatment effect estimation with covariate balance and ESS diagnostics, Difference-in-Differences treatment effect estimation, and Causal Sensitivity Analysis with multi-estimator comparisons, IPTW weight truncation, and unmeasured confounding scenarios), complete with input validation and interactive OpenAPI documentation.
 
 ---
 
@@ -1191,6 +1191,212 @@ curl -X POST http://127.0.0.1:8000/api/causal/difference-in-differences \
   # Windows PowerShell
   .\.venv\Scripts\python.exe -m pytest tests/test_api.py -q
   ```
+
+
+---
+
+### Causal Sensitivity Analysis and Robustness Checks
+- **URL**: `POST /api/causal/sensitivity-analysis`
+- **Description**: Conducts systematic sensitivity analysis and robustness checks for causal inference across three complementary dimensions:
+  1. **Multi-Estimator Comparison (Part A)**: Evaluates whether conclusions are consistent across distinct functional specifications: Unadjusted Difference in Means, Regression-Adjusted ATE (G-computation), and Inverse Probability of Treatment Weighting (IPTW).
+  2. **IPTW Weight Truncation Sensitivity (Part B)**: Assesses weight stability, effective sample sizes (ESS), and point estimate shifts across caller-specified truncation thresholds (e.g. $[10.0, 5.0, 3.0]$).
+  3. **Unmeasured Confounding Sensitivity (Part C)**: Applies a transparent hypothetical bias-adjustment model ($\tau_{\text{adjusted}}(b) = \tau_{\text{observed}} - b$) to assess whether qualitative conclusions (and confidence intervals) would hold under plausible unmeasured confounding scenarios.
+  4. **Dual Execution Modes**:
+     - *Dataset Mode*: Accepts raw observation records and coordinates full multi-estimator comparisons, optional IPTW truncation, and bias scenarios.
+     - *Standalone Mode*: Accepts a pre-calculated point estimate (`observed_estimate`), hypothetical bias scenarios (`bias_values`), and optional confidence interval (`confidence_interval`) without requiring raw microdata.
+
+- **Request Parameters**:
+  - `data` (list of dicts, optional): Observation records (required in dataset mode).
+  - `treatment_col` (string, optional): Binary treatment assignment column (required if `data` is provided).
+  - `outcome_col` (string, optional): Numeric outcome column (required if `data` is provided).
+  - `confounder_cols` (list of strings, optional): Confounders for regression adjustment and IPTW.
+  - `reference_estimator` (string, optional, default `"regression_adjusted"`): Baseline reference estimator (`"regression_adjusted"`, `"iptw"`, or `"unadjusted"`).
+  - `truncation_thresholds` (list of positive floats, optional): Sequence of upper bounds for IPTW weight truncation checks (weights are never truncated unless explicitly requested).
+  - `hypothetical_biases` / `bias_values` (float or list of floats, optional): Hypothetical signed bias values $b$ for unmeasured confounding scenarios.
+  - `observed_estimate` (float, optional): Observed effect estimate (required in standalone mode when `data` is omitted).
+  - `confidence_interval` (list of 2 floats, optional): Two-element confidence interval $[L, U]$ of the observed estimate in standalone mode.
+  - `drop_missing` (boolean, optional, default `false`): Whether to drop incomplete rows across analysis columns.
+
+**Example 1: Dataset Mode with Truncation and Bias Scenarios**:
+```bash
+curl -X POST http://127.0.0.1:8000/api/causal/sensitivity-analysis \
+  -H "Content-Type: application/json" \
+  -d '{
+    "data": [
+      {"treatment": 1, "outcome": 20.0, "x": 2.0},
+      {"treatment": 1, "outcome": 25.0, "x": 3.0},
+      {"treatment": 1, "outcome": 30.0, "x": 4.0},
+      {"treatment": 0, "outcome": 10.0, "x": 1.0},
+      {"treatment": 0, "outcome": 15.0, "x": 2.0},
+      {"treatment": 0, "outcome": 20.0, "x": 3.0}
+    ],
+    "treatment_col": "treatment",
+    "outcome_col": "outcome",
+    "confounder_cols": ["x"],
+    "reference_estimator": "regression_adjusted",
+    "truncation_thresholds": [10.0, 3.0],
+    "hypothetical_biases": [1.0, 2.0, -1.0]
+  }'
+```
+
+**Example 1 Response (200 OK)**:
+```json
+{
+  "reference_estimator": "regression_adjusted",
+  "reference_estimate": 10.0,
+  "observed_estimate": 10.0,
+  "reference_confidence_interval": null,
+  "estimator_comparisons": {
+    "unadjusted": {
+      "name": "Unadjusted Difference in Means",
+      "available": true,
+      "estimate": 10.0,
+      "difference_from_reference": 0.0,
+      "confidence_interval": [2.6397, 17.3603],
+      "n_total": 6,
+      "mean_treated": 25.0,
+      "mean_control": 15.0
+    },
+    "regression_adjusted": {
+      "name": "Regression-Adjusted ATE (G-computation)",
+      "available": true,
+      "estimate": 10.0,
+      "difference_from_reference": 0.0,
+      "model_type": "ols_linear"
+    },
+    "iptw": {
+      "name": "Inverse Probability of Treatment Weighting (IPTW)",
+      "available": true,
+      "estimate": 10.0,
+      "difference_from_reference": 0.0,
+      "ess_treated": 2.94,
+      "ess_control": 2.94,
+      "ess_total": 5.88
+    }
+  },
+  "iptw_truncation_analysis": {
+    "status": "evaluated",
+    "untruncated_estimate": 10.0,
+    "scenarios": [
+      {
+        "threshold": 10.0,
+        "estimate": 10.0,
+        "difference_from_untruncated": 0.0,
+        "weights_truncated_count": 0,
+        "max_weight": 2.5,
+        "ess_total": 5.88,
+        "identical_to_untruncated": true
+      },
+      {
+        "threshold": 3.0,
+        "estimate": 10.0,
+        "difference_from_untruncated": 0.0,
+        "weights_truncated_count": 0,
+        "max_weight": 2.5,
+        "ess_total": 5.88,
+        "identical_to_untruncated": true
+      }
+    ],
+    "note": "Weight truncation caps extreme weights at a specified upper threshold, reducing sample variance at the potential cost of introducing finite-sample bias."
+  },
+  "unmeasured_confounding_analysis": {
+    "observed_estimate": 10.0,
+    "confidence_interval": null,
+    "bias_scenarios": [
+      {
+        "hypothetical_bias": 1.0,
+        "adjusted_estimate": 9.0,
+        "adjusted_confidence_interval": null,
+        "interval_includes_zero": null
+      },
+      {
+        "hypothetical_bias": 2.0,
+        "adjusted_estimate": 8.0,
+        "adjusted_confidence_interval": null,
+        "interval_includes_zero": null
+      },
+      {
+        "hypothetical_bias": -1.0,
+        "adjusted_estimate": 11.0,
+        "adjusted_confidence_interval": null,
+        "interval_includes_zero": null
+      }
+    ],
+    "sign_convention": "tau_adjusted(b) = tau_observed - b. Positive bias (b > 0) assumes unmeasured confounding inflated the observed effect; negative bias (b < 0) assumes unmeasured confounding suppressed the observed effect."
+  },
+  "bias_scenarios": [
+    {"hypothetical_bias": 1.0, "adjusted_estimate": 9.0},
+    {"hypothetical_bias": 2.0, "adjusted_estimate": 8.0},
+    {"hypothetical_bias": -1.0, "adjusted_estimate": 11.0}
+  ],
+  "sign_convention": "tau_adjusted(b) = tau_observed - b.",
+  "treatment_col": "treatment",
+  "outcome_col": "outcome",
+  "confounder_cols": ["x"],
+  "warnings": [],
+  "interpretation": "Causal sensitivity analysis evaluated reference estimator 'regression_adjusted' with estimate 10.0000. Available estimates (Unadjusted: 10.0000, Regression-Adjusted: 10.0000, IPTW: 10.0000). Weight truncation status: evaluated. Unmeasured confounding status: evaluated.",
+  "assumptions": "Causal sensitivity analysis explores robustness to analytical decisions and hypothetical unmeasured confounding. Core principles: (1) Multi-estimator consistency: different estimators target the same ATE under different functional forms... Divergence indicates model misspecification; agreement does NOT guarantee causal validity. (2) Weight truncation: trades variance reduction against bias. (3) Unmeasured confounding: sensitivity parameters are hypothetical assumptions that explore robustness bounds; sensitivity analysis does NOT prove absence of unmeasured confounding or causal validity."
+}
+```
+
+**Example 2: Standalone Mode (Observed Estimate with Interval Shifting)**:
+```bash
+curl -X POST http://127.0.0.1:8000/api/causal/sensitivity-analysis \
+  -H "Content-Type: application/json" \
+  -d '{
+    "observed_estimate": 5.0,
+    "bias_values": [2.0, 5.0, -2.0],
+    "confidence_interval": [3.0, 7.0]
+  }'
+```
+
+**Example 2 Response (200 OK)**:
+```json
+{
+  "observed_estimate": 5.0,
+  "confidence_interval": [3.0, 7.0],
+  "bias_scenarios": [
+    {
+      "hypothetical_bias": 2.0,
+      "adjusted_estimate": 3.0,
+      "adjusted_confidence_interval": [1.0, 5.0],
+      "interval_includes_zero": false
+    },
+    {
+      "hypothetical_bias": 5.0,
+      "adjusted_estimate": 0.0,
+      "adjusted_confidence_interval": [-2.0, 2.0],
+      "interval_includes_zero": true
+    },
+    {
+      "hypothetical_bias": -2.0,
+      "adjusted_estimate": 7.0,
+      "adjusted_confidence_interval": [5.0, 9.0],
+      "interval_includes_zero": false
+    }
+  ],
+  "sign_convention": "tau_adjusted(b) = tau_observed - b. Positive bias (b > 0) assumes unmeasured confounding inflated the observed effect; negative bias (b < 0) assumes unmeasured confounding suppressed the observed effect.",
+  "interpretation": "Sensitivity analysis evaluated 3 hypothetical unmeasured confounding scenario(s) for an observed estimate of 5.0000. Under 1 of 3 scenario(s) (bias=[5.0]), the adjusted confidence interval spans zero, indicating that the null effect cannot be ruled out.",
+  "assumptions": "Hypothetical bias-adjustment sensitivity analysis explores whether qualitative conclusions are robust to potential unmeasured confounding. Key assumptions and limitations: (1) Scenario-based: the bias parameter (b) is an assumed hypothetical quantity, NOT an empirically identified statistic; (2) Additive structure; (3) Informational role: sensitivity analysis illustrates how findings change under specific violations of exchangeability, but cannot prove that unmeasured confounding is absent or bounded; (4) Inference disclaimer: shifted intervals are conditional on the truth of the assumed bias; no statistical p-values are calculated."
+}
+```
+
+- **Example Validation Errors (422 Unprocessable Content)**:
+  - Missing all inputs: `"Either 'data' (with 'treatment_col' and 'outcome_col') or 'observed_estimate' (with 'hypothetical_biases' or 'bias_values') must be provided."`
+  - Empty dataset: `"data cannot be empty. Causal inference requires observations."`
+  - Missing column in dataset mode: `"treatment_col must be provided as a non-empty string when data is provided."`
+  - Conflicting column roles: `"treatment_col and outcome_col cannot be the same column ('t')."`
+  - Confounder collision: `"treatment_col ('t') cannot also appear in confounder_cols."`
+  - Unsupported reference estimator: `"Unsupported reference_estimator: 'random_forest'. Expected one of: ['iptw', 'regression_adjusted', 'unadjusted']."`
+  - Non-positive truncation threshold: `"truncation_thresholds element at index 0 must be strictly positive, got -1.0."`
+  - Standalone mode missing bias scenarios: `"bias_values (or hypothetical_biases) must be provided when analyzing unmeasured confounding for an observed estimate."`
+  - Reversed confidence interval bounds: `"confidence_interval lower bound (10.0) cannot exceed upper bound (5.0)."`
+  - Non-numeric estimate: `"observed_estimate must be a numeric float or int, got str."`
+
+- **Viva Concepts on Causal Sensitivity Analysis**:
+  1. *Why doesn't multi-estimator agreement prove causality?* If an unmeasured confounder $U$ affects both treatment assignment and the outcome, all three estimators (unadjusted, G-computation, and IPTW) will be equally biased because none of them adjust for $U$. Agreement shows that the functional form (linear outcome model vs. logistic propensity model) does not drastically distort the result, but cannot substitute for unconfoundedness.
+  2. *What is the bias-variance trade-off in IPTW weight truncation?* Weight truncation caps large weights at a fixed threshold $M$. While this eliminates huge variance and stabilizes the effective sample size (ESS), it introduces finite-sample bias and alters the target estimand from the true population ATE to a pseudo-population where extreme units receive downweighted influence.
+  3. *Why can't sensitivity analysis produce a "robustness p-value"?* Sensitivity parameters (hypothetical bias $b$) are subjective assumptions exploring "what-if" scenarios. Inventing a pseudo p-value would falsely imply that the unmeasured confounder's distribution was known and empirically tested. The adjusted interval $[L - b, U - b]$ is purely conditional on the assumption that the true unmeasured bias is exactly $b$.
 
 ---
 

@@ -6,7 +6,7 @@ Exposes statistical engine functionality for A/B testing and sample size estimat
 import math
 from pathlib import Path
 import sys
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Sequence, Union
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -32,6 +32,8 @@ from causal_engine import (
     estimate_propensity_scores,
     estimate_iptw_ate,
     estimate_difference_in_differences,
+    run_causal_sensitivity_analysis,
+    analyze_unmeasured_confounding_sensitivity,
 )
 import numpy as np
 
@@ -1860,6 +1862,376 @@ async def difference_in_differences_endpoint(
             post_value=resolved_post,
             drop_missing=payload.drop_missing,
         )
+        return _sanitize_for_json(results)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=str(exc),
+        )
+
+
+
+class CausalSensitivityAnalysisRequest(BaseModel):
+    data: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="Tabular dataset records for multi-estimator sensitivity analysis.",
+        examples=[
+            [
+                {"treatment": 1, "outcome": 25.0, "age": 30.0},
+                {"treatment": 1, "outcome": 35.0, "age": 40.0},
+                {"treatment": 0, "outcome": 15.0, "age": 25.0},
+                {"treatment": 0, "outcome": 25.0, "age": 35.0},
+            ]
+        ],
+    )
+    treatment_col: Optional[str] = Field(
+        None,
+        description="Name of the binary treatment assignment column (required if data is provided).",
+        examples=["treatment"],
+    )
+    outcome_col: Optional[str] = Field(
+        None,
+        description="Name of the numeric outcome column (required if data is provided).",
+        examples=["outcome"],
+    )
+    confounder_cols: Optional[List[str]] = Field(
+        None,
+        description="Optional list of observed confounder column names for regression adjustment and IPTW.",
+        examples=[["age"]],
+    )
+    treated_value: Optional[Any] = Field(
+        None,
+        description="Label identifying the treated group. Inferred automatically if omitted.",
+        examples=[1],
+    )
+    control_value: Optional[Any] = Field(
+        None,
+        description="Label identifying the control group. Inferred automatically if omitted.",
+        examples=[0],
+    )
+    untreated_value: Optional[Any] = Field(
+        None,
+        description="Alias for control_value.",
+        examples=[0],
+    )
+    drop_missing: bool = Field(
+        default=False,
+        description="Whether to drop rows with missing values in required analysis columns. Default is False.",
+        examples=[False],
+    )
+    reference_estimator: Optional[str] = Field(
+        default="regression_adjusted",
+        description="Primary reference estimator ('regression_adjusted', 'iptw', or 'unadjusted').",
+        examples=["regression_adjusted"],
+    )
+    truncation_thresholds: Optional[List[float]] = Field(
+        None,
+        description="Optional sequence of strictly positive upper weight bounds for IPTW truncation sensitivity checks.",
+        examples=[[10.0, 5.0, 3.0]],
+    )
+    hypothetical_biases: Optional[Union[float, List[float]]] = Field(
+        None,
+        description="Optional hypothetical signed bias values (b) for unmeasured confounding sensitivity scenarios: tau_adjusted = tau_observed - b.",
+        examples=[[1.0, 2.0, -1.0]],
+    )
+    bias_values: Optional[Union[float, List[float]]] = Field(
+        None,
+        description="Alias for hypothetical_biases, or required bias values in standalone observed-estimate mode.",
+        examples=[[1.0, 2.0, -1.0]],
+    )
+    observed_estimate: Optional[float] = Field(
+        None,
+        description="Observed effect estimate for standalone unmeasured confounding sensitivity analysis (used when data is omitted).",
+        examples=[5.0],
+    )
+    confidence_interval: Optional[List[float]] = Field(
+        None,
+        description="Optional two-element confidence interval [lower, upper] for the observed estimate in standalone mode.",
+        examples=[[3.0, 7.0]],
+    )
+
+    @field_validator("data")
+    @classmethod
+    def validate_data_list(cls, v: Any) -> Optional[List[Dict[str, Any]]]:
+        if v is None:
+            return None
+        if not isinstance(v, list):
+            raise ValueError("data must be a list of observation dictionaries.")
+        if len(v) == 0:
+            raise ValueError("data cannot be empty. Causal inference requires observations.")
+        for idx, row in enumerate(v):
+            if not isinstance(row, dict):
+                raise ValueError(f"Observation at index {idx} must be a dictionary, got {type(row).__name__}.")
+        return v
+
+    @field_validator("treatment_col", "outcome_col")
+    @classmethod
+    def validate_column_name(cls, v: Any, info: Any) -> Optional[str]:
+        if v is None:
+            return None
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError(f"{info.field_name} must be a non-empty string when provided.")
+        return v.strip()
+
+    @field_validator("confounder_cols")
+    @classmethod
+    def validate_confounder_names(cls, v: Any) -> Optional[List[str]]:
+        if v is None:
+            return None
+        if not isinstance(v, (list, tuple)):
+            raise ValueError("confounder_cols must be a list of column names.")
+        cleaned = []
+        for idx, col in enumerate(v):
+            if not isinstance(col, str) or not col.strip():
+                raise ValueError(f"confounder_cols element at index {idx} must be a non-empty string.")
+            cleaned.append(col.strip())
+        return cleaned
+
+    @field_validator("truncation_thresholds", mode="before")
+    @classmethod
+    def validate_truncation_thresholds(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        if isinstance(v, bool) or not isinstance(v, (list, tuple)):
+            raise ValueError("truncation_thresholds must be a list of strictly positive numbers.")
+        if len(v) == 0:
+            raise ValueError("truncation_thresholds cannot be empty when provided.")
+        validated = []
+        for idx, thresh in enumerate(v):
+            if thresh is None or isinstance(thresh, bool) or not isinstance(thresh, (int, float)):
+                raise ValueError(f"truncation_thresholds element at index {idx} must be a numeric float or int.")
+            if math.isnan(thresh) or math.isinf(thresh):
+                raise ValueError(f"truncation_thresholds element at index {idx} cannot be NaN or infinite.")
+            if float(thresh) <= 0.0:
+                raise ValueError(f"truncation_thresholds element at index {idx} must be strictly positive, got {thresh}.")
+            validated.append(float(thresh))
+        return validated
+
+    @field_validator("observed_estimate", mode="before")
+    @classmethod
+    def validate_observed_estimate(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        if isinstance(v, bool):
+            raise ValueError("observed_estimate cannot be a boolean.")
+        if not isinstance(v, (int, float)):
+            raise ValueError(f"observed_estimate must be a numeric float or int, got {type(v).__name__}.")
+        if math.isnan(v) or math.isinf(v):
+            raise ValueError("observed_estimate cannot be NaN or infinite.")
+        return float(v)
+
+    @field_validator("hypothetical_biases", "bias_values", mode="before")
+    @classmethod
+    def validate_biases(cls, v: Any, info: Any) -> Any:
+        if v is None:
+            return None
+        if isinstance(v, bool):
+            raise ValueError(f"{info.field_name} cannot be a boolean.")
+        if isinstance(v, (int, float)):
+            if math.isnan(v) or math.isinf(v):
+                raise ValueError(f"{info.field_name} cannot be NaN or infinite.")
+            return float(v)
+        if isinstance(v, (list, tuple)):
+            if len(v) == 0:
+                raise ValueError(f"{info.field_name} cannot be empty when provided.")
+            validated = []
+            for idx, b in enumerate(v):
+                if b is None or isinstance(b, bool) or not isinstance(b, (int, float)):
+                    raise ValueError(f"{info.field_name} element at index {idx} must be a numeric float or int.")
+                if math.isnan(b) or math.isinf(b):
+                    raise ValueError(f"{info.field_name} element at index {idx} cannot be NaN or infinite.")
+                validated.append(float(b))
+            return validated
+        raise ValueError(f"{info.field_name} must be a number or list of numbers.")
+
+    @field_validator("confidence_interval", mode="before")
+    @classmethod
+    def validate_ci(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        if isinstance(v, bool) or not isinstance(v, (list, tuple)):
+            raise ValueError("confidence_interval must be a list of 2 numbers.")
+        if len(v) != 2:
+            raise ValueError(f"confidence_interval must contain exactly 2 elements [lower, upper], got {len(v)}.")
+        for idx, bound in enumerate(v):
+            if bound is None or isinstance(bound, bool) or not isinstance(bound, (int, float)):
+                raise ValueError(f"confidence_interval bound at index {idx} must be a numeric float or int.")
+            if math.isnan(bound) or math.isinf(bound):
+                raise ValueError(f"confidence_interval bound at index {idx} cannot be NaN or infinite.")
+        l_val, u_val = float(v[0]), float(v[1])
+        if l_val > u_val:
+            raise ValueError(f"confidence_interval lower bound ({l_val}) cannot exceed upper bound ({u_val}).")
+        return [l_val, u_val]
+
+    @field_validator("drop_missing")
+    @classmethod
+    def validate_drop_missing(cls, v: Any) -> bool:
+        if not isinstance(v, bool):
+            raise ValueError("drop_missing must be a boolean.")
+        return v
+
+    @model_validator(mode="after")
+    def validate_sensitivity_request(self) -> "CausalSensitivityAnalysisRequest":
+        if self.data is not None:
+            if not self.treatment_col:
+                raise ValueError("treatment_col must be provided as a non-empty string when data is provided.")
+            if not self.outcome_col:
+                raise ValueError("outcome_col must be provided as a non-empty string when data is provided.")
+            if self.treatment_col == self.outcome_col:
+                raise ValueError(f"treatment_col and outcome_col cannot be the same column ('{self.treatment_col}').")
+            if self.confounder_cols:
+                if self.treatment_col in self.confounder_cols:
+                    raise ValueError(f"treatment_col ('{self.treatment_col}') cannot also appear in confounder_cols.")
+                if self.outcome_col in self.confounder_cols:
+                    raise ValueError(f"outcome_col ('{self.outcome_col}') cannot also appear in confounder_cols.")
+            if self.reference_estimator:
+                norm_ref = self.reference_estimator.lower().strip()
+                valid_refs = {"regression_adjusted", "iptw", "unadjusted"}
+                if norm_ref not in valid_refs:
+                    raise ValueError(
+                        f"Unsupported reference_estimator: {self.reference_estimator!r}. "
+                        f"Expected one of: {sorted(list(valid_refs))}."
+                    )
+                self.reference_estimator = norm_ref
+            # Label checks
+            actual_ctrl = self.control_value if self.control_value is not None else self.untreated_value
+            if self.treated_value is not None and actual_ctrl is not None and self.treated_value == actual_ctrl:
+                raise ValueError("treated_value and control_value cannot be identical.")
+        else:
+            if self.observed_estimate is None:
+                raise ValueError(
+                    "Either 'data' (with 'treatment_col' and 'outcome_col') or 'observed_estimate' "
+                    "(with 'hypothetical_biases' or 'bias_values') must be provided."
+                )
+            resolved_biases = self.hypothetical_biases if self.hypothetical_biases is not None else self.bias_values
+            if resolved_biases is None:
+                raise ValueError(
+                    "bias_values (or hypothetical_biases) must be provided when analyzing unmeasured confounding for an observed estimate."
+                )
+        return self
+
+
+class CausalSensitivityAnalysisResponse(BaseModel):
+    reference_estimator: Optional[str] = Field(
+        None,
+        description="Name of the baseline reference estimator used ('regression_adjusted', 'iptw', or 'unadjusted').",
+    )
+    reference_estimate: Optional[float] = Field(
+        None,
+        description="Point estimate of the causal treatment effect from the reference estimator.",
+    )
+    observed_estimate: Optional[float] = Field(
+        None,
+        description="Observed effect estimate analyzed (alias for reference_estimate in dataset mode).",
+    )
+    reference_confidence_interval: Optional[List[float]] = Field(
+        None,
+        description="Confidence interval [lower, upper] from reference estimator if available.",
+    )
+    confidence_interval: Optional[List[float]] = Field(
+        None,
+        description="Confidence interval [lower, upper] of observed estimate in standalone mode.",
+    )
+    estimator_comparisons: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Cross-estimator point estimates and differences from reference (unadjusted, regression_adjusted, iptw).",
+    )
+    iptw_truncation_analysis: Optional[Dict[str, Any]] = Field(
+        None,
+        description="IPTW weight truncation robustness analysis across requested thresholds.",
+    )
+    unmeasured_confounding_analysis: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Sensitivity results and scenarios for hypothetical unmeasured confounding.",
+    )
+    bias_scenarios: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="List of evaluated hypothetical bias scenarios with adjusted estimates and intervals.",
+    )
+    sign_convention: Optional[str] = Field(
+        None,
+        description="Explanation of the bias adjustment sign convention: tau_adjusted = tau_observed - b.",
+    )
+    treatment_col: Optional[str] = Field(
+        None,
+        description="Name of the treatment column analyzed.",
+    )
+    outcome_col: Optional[str] = Field(
+        None,
+        description="Name of the outcome column analyzed.",
+    )
+    confounder_cols: Optional[List[str]] = Field(
+        None,
+        description="List of observed confounder columns included in multi-estimator models.",
+    )
+    warnings: Optional[List[str]] = Field(
+        None,
+        description="List of analytical warnings or model divergence notices.",
+    )
+    interpretation: str = Field(
+        ...,
+        description="Summary narrative explaining sensitivity findings and robustness checks.",
+    )
+    assumptions: str = Field(
+        ...,
+        description="Educational explanation of sensitivity analysis assumptions, limitations, and caveats.",
+    )
+
+
+@app.post(
+    "/api/causal/sensitivity-analysis",
+    response_model=CausalSensitivityAnalysisResponse,
+    tags=["Causal Inference"],
+    summary="Conduct causal sensitivity analysis across estimators and unmeasured confounding",
+)
+async def causal_sensitivity_analysis_endpoint(
+    payload: CausalSensitivityAnalysisRequest,
+) -> Dict[str, Any]:
+    """Perform causal sensitivity analysis and robustness checks.
+
+    Evaluates:
+    1. Multi-estimator comparison (unadjusted difference in means, regression adjustment, IPTW).
+    2. Weight truncation robustness checks for IPTW across user-specified thresholds.
+    3. Hypothetical bias-adjustment sensitivity analysis for potential unmeasured confounding.
+    """
+    try:
+        biases = (
+            payload.hypothetical_biases
+            if payload.hypothetical_biases is not None
+            else payload.bias_values
+        )
+        resolved_control = (
+            payload.control_value
+            if payload.control_value is not None
+            else payload.untreated_value
+        )
+
+        if payload.data is not None:
+            results = run_causal_sensitivity_analysis(
+                data=payload.data,
+                treatment_col=payload.treatment_col,
+                outcome_col=payload.outcome_col,
+                confounder_cols=payload.confounder_cols,
+                treated_value=payload.treated_value,
+                control_value=resolved_control,
+                drop_missing=payload.drop_missing,
+                reference_estimator=payload.reference_estimator or "regression_adjusted",
+                truncation_thresholds=payload.truncation_thresholds,
+                hypothetical_biases=biases,
+            )
+            unmeas = results.get("unmeasured_confounding_analysis")
+            if isinstance(unmeas, dict) and "bias_scenarios" in unmeas:
+                results["bias_scenarios"] = unmeas.get("bias_scenarios")
+                results["sign_convention"] = unmeas.get("sign_convention")
+        else:
+            results = analyze_unmeasured_confounding_sensitivity(
+                observed_estimate=payload.observed_estimate,
+                bias_values=biases,
+                confidence_interval=payload.confidence_interval,
+            )
+            results["reference_estimate"] = results["observed_estimate"]
+            results["unmeasured_confounding_analysis"] = dict(results)
+
         return _sanitize_for_json(results)
     except ValueError as exc:
         raise HTTPException(
