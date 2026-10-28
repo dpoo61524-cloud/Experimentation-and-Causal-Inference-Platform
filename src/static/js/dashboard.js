@@ -67,6 +67,42 @@ document.addEventListener('DOMContentLoaded', function () {
     const resInterpretationText = document.getElementById('res-interpretation-text');
     const resAssumptionsText = document.getElementById('res-assumptions-text');
 
+    // Section 3: Causal Analysis (Regression-Adjusted ATE) Elements
+    const regStatusBanner = document.getElementById('reg-status-banner');
+    const regUnloadedNotice = document.getElementById('reg-unloaded-notice');
+    const regFormContainer = document.getElementById('reg-form-container');
+    const regDatasetName = document.getElementById('reg-dataset-name');
+    const regDatasetId = document.getElementById('reg-dataset-id');
+    const regDatasetRows = document.getElementById('reg-dataset-rows');
+    const regDatasetCols = document.getElementById('reg-dataset-cols');
+
+    const regForm = document.getElementById('reg-analysis-form');
+    const regTreatmentSelect = document.getElementById('reg-treatment-select');
+    const regOutcomeSelect = document.getElementById('reg-outcome-select');
+    const regConfoundersContainer = document.getElementById('reg-confounders-container');
+    const regTreatedValInput = document.getElementById('reg-treated-val-input');
+    const regUntreatedValInput = document.getElementById('reg-untreated-val-input');
+    const regDropMissingCheckbox = document.getElementById('reg-drop-missing-checkbox');
+    const runRegBtn = document.getElementById('run-reg-btn');
+
+    // Section 3: Results Elements
+    const regResultsPanel = document.getElementById('reg-results-panel');
+    const resRegDatasetName = document.getElementById('res-reg-dataset-name');
+    const resRegTotalRows = document.getElementById('res-reg-total-rows');
+    const resRegEvalRows = document.getElementById('res-reg-eval-rows');
+    const resRegDroppedRows = document.getElementById('res-reg-dropped-rows');
+    const resRegAdjustedPoint = document.getElementById('res-reg-adjusted-point');
+    const resRegRawPoint = document.getElementById('res-reg-raw-point');
+    const resRegR2 = document.getElementById('res-reg-r2');
+    const resRegMeanTreated = document.getElementById('res-reg-mean-treated');
+    const resRegMeanControl = document.getElementById('res-reg-mean-control');
+    const resRegFeatureCount = document.getElementById('res-reg-feature-count');
+    const resRegNumConf = document.getElementById('res-reg-num-conf');
+    const resRegCatConf = document.getElementById('res-reg-cat-conf');
+    const resRegFeaturesList = document.getElementById('res-reg-features-list');
+    const resRegInterpretationText = document.getElementById('res-reg-interpretation-text');
+    const resRegAssumptionsText = document.getElementById('res-reg-assumptions-text');
+
     // Active session dataset metadata
     let currentDataset = null;
 
@@ -311,8 +347,9 @@ document.addEventListener('DOMContentLoaded', function () {
             schemaTableBody.appendChild(tr);
         });
 
-        // Initialize ATE analysis workflow for this dataset
+        // Initialize causal analysis workflows for this dataset
         setupAteAnalysis(data);
+        setupRegAnalysis(data);
     }
 
     // --- 6. Causal Analysis (Unadjusted ATE) Logic ---
@@ -524,6 +561,315 @@ document.addEventListener('DOMContentLoaded', function () {
         }
         if (resAssumptionsText) {
             resAssumptionsText.textContent = r.assumptions || 'No identification assumptions documented.';
+        }
+    }
+
+    // --- 7. Causal Analysis (Regression-Adjusted ATE) Logic (Stage 7.4B) ---
+    function showRegStatus(message, type) {
+        if (!regStatusBanner) return;
+        regStatusBanner.className = 'status-indicator status-visible status-' + type;
+        regStatusBanner.textContent = message;
+    }
+
+    function clearRegStatus() {
+        if (!regStatusBanner) return;
+        regStatusBanner.className = 'status-indicator';
+        regStatusBanner.textContent = '';
+    }
+
+    function setupRegAnalysis(data) {
+        if (!data || !data.columns) return;
+        if (regUnloadedNotice) regUnloadedNotice.style.display = 'none';
+        if (regFormContainer) regFormContainer.style.display = 'block';
+        if (regResultsPanel) regResultsPanel.style.display = 'none';
+        clearRegStatus();
+
+        if (regDatasetName) regDatasetName.textContent = data.filename + (data.is_benchmark ? ' [Benchmark]' : '');
+        if (regDatasetId) regDatasetId.textContent = data.dataset_id;
+        if (regDatasetRows) regDatasetRows.textContent = formatNumber(data.row_count);
+        if (regDatasetCols) regDatasetCols.textContent = formatNumber(data.column_count);
+
+        if (regTreatmentSelect && regOutcomeSelect) {
+            regTreatmentSelect.innerHTML = '<option value="">-- Choose treatment column --</option>';
+            regOutcomeSelect.innerHTML = '<option value="">-- Choose outcome column --</option>';
+
+            let defaultTreatment = '';
+            let defaultOutcome = '';
+
+            data.columns.forEach(function (col) {
+                const optT = document.createElement('option');
+                optT.value = col.name;
+                optT.textContent = col.name + ' (' + col.inferred_type + ')';
+                regTreatmentSelect.appendChild(optT);
+
+                const optO = document.createElement('option');
+                optO.value = col.name;
+                optO.textContent = col.name + ' (' + col.inferred_type + ')';
+                regOutcomeSelect.appendChild(optO);
+
+                const nameLower = col.name.toLowerCase();
+                if (!defaultTreatment && (col.inferred_type === 'boolean' || nameLower === 'treatment' || nameLower === 'mens')) {
+                    defaultTreatment = col.name;
+                }
+                if (!defaultOutcome && (col.inferred_type === 'numeric' || nameLower === 'spend' || nameLower === 'conversion' || nameLower === 'outcome')) {
+                    defaultOutcome = col.name;
+                }
+            });
+
+            if (defaultTreatment) regTreatmentSelect.value = defaultTreatment;
+            if (defaultOutcome && defaultOutcome !== defaultTreatment) {
+                regOutcomeSelect.value = defaultOutcome;
+            }
+        }
+
+        // Populate confounder checkboxes
+        if (regConfoundersContainer) {
+            regConfoundersContainer.innerHTML = '';
+            data.columns.forEach(function (col) {
+                const label = document.createElement('label');
+                label.className = 'confounder-checkbox-item';
+                label.setAttribute('data-col', col.name);
+
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.name = 'reg-confounder';
+                checkbox.value = col.name;
+
+                // Check default confounders for Hillstrom if not treatment or outcome
+                const nameLower = col.name.toLowerCase();
+                if (data.is_benchmark && (nameLower === 'recency' || nameLower === 'history')) {
+                    checkbox.checked = true;
+                }
+
+                checkbox.addEventListener('change', function () {
+                    validateRegForm();
+                });
+
+                const spanName = document.createElement('span');
+                spanName.textContent = col.name;
+
+                const spanType = document.createElement('span');
+                spanType.className = 'col-type-tag';
+                spanType.textContent = col.inferred_type;
+
+                label.appendChild(checkbox);
+                label.appendChild(spanName);
+                label.appendChild(spanType);
+
+                regConfoundersContainer.appendChild(label);
+            });
+        }
+
+        updateConfoundersAvailability();
+        validateRegForm();
+    }
+
+    function updateConfoundersAvailability() {
+        if (!regConfoundersContainer) return;
+        const tCol = regTreatmentSelect ? regTreatmentSelect.value : '';
+        const oCol = regOutcomeSelect ? regOutcomeSelect.value : '';
+
+        const items = regConfoundersContainer.querySelectorAll('.confounder-checkbox-item');
+        items.forEach(function (item) {
+            const col = item.getAttribute('data-col');
+            const checkbox = item.querySelector('input[type="checkbox"]');
+            if (!checkbox) return;
+
+            if (col && (col === tCol || col === oCol)) {
+                checkbox.checked = false;
+                checkbox.disabled = true;
+                item.classList.add('disabled');
+            } else {
+                checkbox.disabled = false;
+                item.classList.remove('disabled');
+            }
+        });
+    }
+
+    function getSelectedConfounders() {
+        if (!regConfoundersContainer) return [];
+        const checkboxes = regConfoundersContainer.querySelectorAll('input[name="reg-confounder"]:checked');
+        const selected = [];
+        checkboxes.forEach(function (cb) {
+            if (!cb.disabled && cb.value) {
+                selected.push(cb.value);
+            }
+        });
+        return selected;
+    }
+
+    function validateRegForm() {
+        if (!currentDataset) {
+            if (runRegBtn) runRegBtn.disabled = true;
+            return false;
+        }
+
+        const tCol = regTreatmentSelect ? regTreatmentSelect.value : '';
+        const oCol = regOutcomeSelect ? regOutcomeSelect.value : '';
+        const selectedConfounders = getSelectedConfounders();
+
+        if (!tCol || !oCol) {
+            clearRegStatus();
+            if (runRegBtn) runRegBtn.disabled = true;
+            return false;
+        }
+
+        if (tCol === oCol) {
+            showRegStatus('Treatment and Outcome columns cannot be identical ("' + tCol + '").', 'error');
+            if (runRegBtn) runRegBtn.disabled = true;
+            return false;
+        }
+
+        if (selectedConfounders.length === 0) {
+            clearRegStatus();
+            if (runRegBtn) runRegBtn.disabled = true;
+            return false;
+        }
+
+        // Check role conflicts
+        for (let i = 0; i < selectedConfounders.length; i++) {
+            const cCol = selectedConfounders[i];
+            if (cCol === tCol) {
+                showRegStatus('Confounder "' + cCol + '" cannot also be the Treatment column.', 'error');
+                if (runRegBtn) runRegBtn.disabled = true;
+                return false;
+            }
+            if (cCol === oCol) {
+                showRegStatus('Confounder "' + cCol + '" cannot also be the Outcome column.', 'error');
+                if (runRegBtn) runRegBtn.disabled = true;
+                return false;
+            }
+        }
+
+        clearRegStatus();
+        if (runRegBtn) runRegBtn.disabled = false;
+        return true;
+    }
+
+    if (regTreatmentSelect) {
+        regTreatmentSelect.addEventListener('change', function () {
+            updateConfoundersAvailability();
+            validateRegForm();
+        });
+    }
+
+    if (regOutcomeSelect) {
+        regOutcomeSelect.addEventListener('change', function () {
+            updateConfoundersAvailability();
+            validateRegForm();
+        });
+    }
+
+    if (runRegBtn) {
+        runRegBtn.addEventListener('click', function (e) {
+            e.preventDefault();
+            if (!validateRegForm()) return;
+            if (!currentDataset) {
+                showRegStatus('No active dataset found. Please load or upload a dataset first.', 'error');
+                return;
+            }
+
+            const selectedConfounders = getSelectedConfounders();
+            const payload = {
+                treatment_col: regTreatmentSelect.value,
+                outcome_col: regOutcomeSelect.value,
+                confounder_cols: selectedConfounders,
+                drop_missing: regDropMissingCheckbox ? regDropMissingCheckbox.checked : false,
+            };
+
+            const treatedVal = regTreatedValInput ? regTreatedValInput.value.trim() : '';
+            if (treatedVal !== '') payload.treated_value = treatedVal;
+
+            const untreatedVal = regUntreatedValInput ? regUntreatedValInput.value.trim() : '';
+            if (untreatedVal !== '') payload.untreated_value = untreatedVal;
+
+            runRegBtn.disabled = true;
+            if (regResultsPanel) regResultsPanel.style.display = 'none';
+            showRegStatus('Estimating Regression-Adjusted ATE on server (evaluating all records via OLS & G-computation)... Please wait.', 'info');
+
+            fetch('/api/dataset/' + encodeURIComponent(currentDataset.dataset_id) + '/causal/regression-adjusted-ate', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                },
+                body: JSON.stringify(payload),
+            })
+                .then(function (res) {
+                    if (!res.ok) {
+                        return res.json().then(function (err) {
+                            throw new Error(err.detail || 'Analysis request failed with HTTP ' + res.status);
+                        });
+                    }
+                    return res.json();
+                })
+                .then(function (results) {
+                    renderRegResults(results);
+                    showRegStatus('Analysis complete: successfully evaluated ' + formatNumber(results.n_total) + ' observations from ' + results.dataset_filename + '.', 'success');
+                })
+                .catch(function (err) {
+                    showRegStatus('Causal Estimation Error: ' + err.message, 'error');
+                })
+                .finally(function () {
+                    runRegBtn.disabled = false;
+                });
+        });
+    }
+
+    function renderRegResults(r) {
+        if (!r) return;
+        if (regResultsPanel) regResultsPanel.style.display = 'block';
+
+        if (resRegDatasetName) resRegDatasetName.textContent = r.dataset_filename || '—';
+        if (resRegTotalRows) resRegTotalRows.textContent = formatNumber(r.total_dataset_rows);
+        if (resRegEvalRows) resRegEvalRows.textContent = formatNumber(r.n_total);
+        if (resRegDroppedRows) resRegDroppedRows.textContent = formatNumber(r.rows_dropped);
+
+        if (resRegAdjustedPoint) {
+            const prefix = (r.adjusted_ate > 0) ? '+' : '';
+            resRegAdjustedPoint.textContent = prefix + Number(r.adjusted_ate).toFixed(4);
+        }
+
+        if (resRegRawPoint) {
+            const rawVal = (r.unadjusted_ate !== null && r.unadjusted_ate !== undefined) ? r.unadjusted_ate : r.raw_difference;
+            const prefix = (rawVal > 0) ? '+' : '';
+            resRegRawPoint.textContent = prefix + Number(rawVal).toFixed(4);
+        }
+
+        if (resRegR2) {
+            resRegR2.textContent = (r.r_squared !== null && r.r_squared !== undefined) ? Number(r.r_squared).toFixed(4) : 'N/A';
+        }
+
+        if (resRegMeanTreated) {
+            resRegMeanTreated.textContent = (r.mean_predicted_treated !== null && r.mean_predicted_treated !== undefined) ? Number(r.mean_predicted_treated).toFixed(4) : 'Not available';
+        }
+
+        if (resRegMeanControl) {
+            resRegMeanControl.textContent = (r.mean_predicted_control !== null && r.mean_predicted_control !== undefined) ? Number(r.mean_predicted_control).toFixed(4) : 'Not available';
+        }
+
+        if (resRegFeatureCount) {
+            resRegFeatureCount.textContent = (r.model_features && Array.isArray(r.model_features)) ? formatNumber(r.model_features.length) : '0';
+        }
+
+        if (resRegNumConf) {
+            resRegNumConf.textContent = (r.numeric_confounders && r.numeric_confounders.length) ? r.numeric_confounders.join(', ') : 'None';
+        }
+
+        if (resRegCatConf) {
+            resRegCatConf.textContent = (r.categorical_confounders && r.categorical_confounders.length) ? r.categorical_confounders.join(', ') : 'None';
+        }
+
+        if (resRegFeaturesList) {
+            resRegFeaturesList.textContent = (r.model_features && r.model_features.length) ? r.model_features.join(', ') : 'None';
+        }
+
+        if (resRegInterpretationText) {
+            resRegInterpretationText.textContent = r.interpretation || 'No interpretation provided.';
+        }
+
+        if (resRegAssumptionsText) {
+            resRegAssumptionsText.textContent = r.assumptions || 'No identification assumptions documented.';
         }
     }
 });

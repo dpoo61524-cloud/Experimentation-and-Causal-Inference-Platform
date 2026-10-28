@@ -32,7 +32,7 @@
 
         <!-- Stage Notice Banner -->
         <div class="info-banner" role="region" aria-label="Development Notice">
-            <strong>Stage 7.4A Active:</strong> Dataset ingestion, schema inspection, and Unadjusted ATE estimation from stored datasets are fully operational. All statistical calculations are executed by the FastAPI causal engine.
+            <strong>Stage 7.4B Active:</strong> Dataset ingestion, schema inspection, Unadjusted ATE, and Regression-Adjusted ATE (G-computation) from stored datasets are fully operational. All statistical calculations are executed by the FastAPI causal engine.
         </div>
 
         <!-- Section 1: Dataset Ingestion & Schema Inspector -->
@@ -300,10 +300,177 @@
             </div>
         </section>
 
-        <!-- Section 3: Available Causal Analysis Methods -->
+        <!-- Section 3: Causal Analysis — Regression-Adjusted ATE -->
+        <section class="section-card" id="regression-analysis-section" aria-labelledby="regression-analysis-heading">
+            <div class="section-header">
+                <h3 id="regression-analysis-heading">3. Causal Analysis: Regression-Adjusted Average Treatment Effect (ATE)</h3>
+                <p>Adjust for observed baseline confounders using G-computation (standardization) over an Ordinary Least Squares outcome response surface.</p>
+            </div>
+
+            <!-- Analysis Status / Alert Banner -->
+            <div id="reg-status-banner" class="status-indicator" role="alert" aria-live="polite"></div>
+
+            <!-- Unloaded Dataset Notice -->
+            <div id="reg-unloaded-notice" class="empty-state-box">
+                <p class="empty-state-title">No Active Dataset Available for Regression Adjustment</p>
+                <p class="empty-state-desc">Upload a CSV or load the Hillstrom benchmark dataset in Section 1 above to select covariates and run regression-adjusted ATE estimation.</p>
+                <p class="empty-state-note">Status: Awaiting dataset ingestion</p>
+            </div>
+
+            <!-- Form & Results Container (Hidden until a dataset is loaded) -->
+            <div id="reg-form-container" style="display: none;">
+                <!-- Selected Dataset Context Box -->
+                <div class="active-dataset-meta-box">
+                    <span class="meta-item"><strong>Active Dataset:</strong> <span id="reg-dataset-name">—</span></span>
+                    <span class="meta-item"><strong>Dataset ID:</strong> <code id="reg-dataset-id">—</code></span>
+                    <span class="meta-item"><strong>Total Rows:</strong> <span id="reg-dataset-rows">—</span></span>
+                    <span class="meta-item"><strong>Total Columns:</strong> <span id="reg-dataset-cols">—</span></span>
+                </div>
+
+                <form id="reg-analysis-form" class="analysis-form" onsubmit="return false;">
+                    <div class="form-row-grid">
+                        <!-- Treatment Column -->
+                        <div class="form-group">
+                            <label for="reg-treatment-select">Treatment Column (Binary <span class="required">*</span>)</label>
+                            <select id="reg-treatment-select" class="form-select" required aria-label="Select treatment column for regression adjustment">
+                                <option value="">-- Choose treatment column --</option>
+                            </select>
+                            <span class="field-hint">Binary treatment indicator column (e.g. 0/1, True/False).</span>
+                        </div>
+
+                        <!-- Outcome Column -->
+                        <div class="form-group">
+                            <label for="reg-outcome-select">Outcome Column (Numeric <span class="required">*</span>)</label>
+                            <select id="reg-outcome-select" class="form-select" required aria-label="Select outcome column for regression adjustment">
+                                <option value="">-- Choose outcome column --</option>
+                            </select>
+                            <span class="field-hint">Numeric response variable modeled as a function of treatment and confounders.</span>
+                        </div>
+                    </div>
+
+                    <!-- Confounder Selection (Checkbox Grid) -->
+                    <div class="form-group" style="margin-top: 14px;">
+                        <label>Observed Confounders / Covariates (Select at least 1 <span class="required">*</span>)</label>
+                        <div id="reg-confounders-container" class="confounders-checkbox-grid" role="group" aria-label="Select confounder columns">
+                            <!-- Populated dynamically with checkboxes -->
+                        </div>
+                        <span class="field-hint">Continuous and categorical baseline covariates adjusted to control for confounding bias.</span>
+                    </div>
+
+                    <!-- Optional Labels Row -->
+                    <div class="form-row-grid" style="margin-top: 14px;">
+                        <div class="form-group">
+                            <label for="reg-treated-val-input">Treated Value Label (Optional)</label>
+                            <input type="text" id="reg-treated-val-input" class="form-input" placeholder="Auto-inferred if empty (e.g. 1)">
+                            <span class="field-hint">Leave blank to auto-infer from binary values.</span>
+                        </div>
+                        <div class="form-group">
+                            <label for="reg-untreated-val-input">Control / Untreated Value Label (Optional)</label>
+                            <input type="text" id="reg-untreated-val-input" class="form-input" placeholder="Auto-inferred if empty (e.g. 0)">
+                            <span class="field-hint">Leave blank to auto-infer from binary values.</span>
+                        </div>
+                    </div>
+
+                    <div class="form-checkbox-row">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="reg-drop-missing-checkbox">
+                            <span><strong>Explicitly drop rows with missing values</strong> (<code>drop_missing=true</code>)</span>
+                        </label>
+                        <p class="field-hint" style="margin-left: 23px; margin-top: 2px;">
+                            When unchecked (default), analysis fails cleanly if missing values exist in the chosen analysis columns.
+                        </p>
+                    </div>
+
+                    <div class="form-actions-row">
+                        <button type="submit" id="run-reg-btn" class="btn btn-primary" disabled>
+                            Run Regression-Adjusted ATE Analysis
+                        </button>
+                    </div>
+                </form>
+
+                <!-- Results Display Panel (Hidden until analysis succeeds) -->
+                <div id="reg-results-panel" style="display: none;">
+                    <div class="results-header-block">
+                        <h4 style="font-size: 15px; font-weight: 600; color: var(--primary-charcoal); margin-bottom: 4px;">
+                            Regression-Adjusted ATE Results &amp; Diagnostic Contrast
+                        </h4>
+                        <p class="table-footnote">
+                            Estimated using G-computation (standardization) over an OLS outcome model. Counterfactual contrasts evaluated across the entire sample.
+                        </p>
+                    </div>
+
+                    <!-- Dataset & Sample Accounting Banner -->
+                    <div class="accounting-card">
+                        <span class="acc-item"><strong>Evaluated Dataset:</strong> <span id="res-reg-dataset-name">—</span></span>
+                        <span class="acc-item"><strong>Total Stored Rows:</strong> <span id="res-reg-total-rows">—</span></span>
+                        <span class="acc-item"><strong>Evaluated Observations:</strong> <span id="res-reg-eval-rows">—</span></span>
+                        <span class="acc-item"><strong>Rows Dropped (Missing):</strong> <span id="res-reg-dropped-rows">—</span></span>
+                    </div>
+
+                    <!-- Primary Statistics KPI Grid -->
+                    <div class="results-kpi-grid">
+                        <div class="res-kpi-card highlight-card">
+                            <div class="res-kpi-label">Adjusted ATE (&tau;&#770;)</div>
+                            <div id="res-reg-adjusted-point" class="res-kpi-val">—</div>
+                            <div class="res-kpi-sub">G-computation marginal contrast</div>
+                        </div>
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Raw Difference in Means</div>
+                            <div id="res-reg-raw-point" class="res-kpi-val">—</div>
+                            <div class="res-kpi-sub">Unadjusted baseline contrast</div>
+                        </div>
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Outcome Model R&sup2;</div>
+                            <div id="res-reg-r2" class="res-kpi-val">—</div>
+                            <div class="res-kpi-sub">Coefficient of determination</div>
+                        </div>
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Counterfactual Treated Mean</div>
+                            <div id="res-reg-mean-treated" class="res-kpi-val">—</div>
+                            <div class="res-kpi-sub">E&#770;[Y(1)] across sample</div>
+                        </div>
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Counterfactual Control Mean</div>
+                            <div id="res-reg-mean-control" class="res-kpi-val">—</div>
+                            <div class="res-kpi-sub">E&#770;[Y(0)] across sample</div>
+                        </div>
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Model Features</div>
+                            <div id="res-reg-feature-count" class="res-kpi-val">—</div>
+                            <div class="res-kpi-sub">Design matrix parameters</div>
+                        </div>
+                    </div>
+
+                    <!-- Covariates & Features Breakdown Table -->
+                    <div style="margin-bottom: 16px;">
+                        <h5 style="font-size: 13px; font-weight: 600; color: var(--primary-charcoal); margin-bottom: 6px;">
+                            Model Specifications &amp; Included Covariates
+                        </h5>
+                        <div class="active-dataset-meta-box" style="margin-bottom: 0;">
+                            <span class="meta-item"><strong>Numeric Confounders:</strong> <span id="res-reg-num-conf">—</span></span>
+                            <span class="meta-item"><strong>Categorical Confounders:</strong> <span id="res-reg-cat-conf">—</span></span>
+                            <span class="meta-item"><strong>Model Design Columns:</strong> <span id="res-reg-features-list">—</span></span>
+                        </div>
+                    </div>
+
+                    <!-- Interpretation & Assumptions Text Blocks -->
+                    <div class="interpretation-block">
+                        <h5>Statistical Interpretation</h5>
+                        <p id="res-reg-interpretation-text">—</p>
+                    </div>
+
+                    <div class="assumptions-block">
+                        <h5>Identification Assumptions &amp; Limitations</h5>
+                        <p id="res-reg-assumptions-text">—</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 4: Available Causal Analysis Methods -->
         <section class="section-card" aria-labelledby="methods-heading">
             <div class="section-header">
-                <h3 id="methods-heading">3. Available Causal Analysis Methods</h3>
+                <h3 id="methods-heading">4. Available Causal Analysis Methods</h3>
                 <p>Six estimators designed for experimental and observational causal inference with explicit identification assumptions.</p>
             </div>
 

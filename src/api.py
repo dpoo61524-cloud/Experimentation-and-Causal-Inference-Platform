@@ -1511,6 +1511,204 @@ async def regression_adjusted_ate_endpoint(
         )
 
 
+class DatasetRegressionAdjustedATERequest(BaseModel):
+    treatment_col: str = Field(
+        ...,
+        description="Name of the binary treatment indicator column in the dataset.",
+        examples=["treatment"],
+    )
+    outcome_col: str = Field(
+        ...,
+        description="Name of the numeric outcome column in the dataset.",
+        examples=["outcome"],
+    )
+    confounder_cols: List[str] = Field(
+        ...,
+        description="Non-empty list of confounder/covariate column names to adjust for.",
+        examples=[["age"]],
+    )
+    treated_value: Optional[Any] = Field(
+        None,
+        description="Optional label identifying treated observations. Inferred automatically if omitted.",
+        examples=[1],
+    )
+    untreated_value: Optional[Any] = Field(
+        None,
+        description="Optional label identifying control/untreated observations. Inferred automatically if omitted.",
+        examples=[0],
+    )
+    drop_missing: bool = Field(
+        default=False,
+        description="Whether to explicitly drop rows with missing values across analysis columns. Default is false.",
+        examples=[False],
+    )
+
+    @field_validator("treatment_col", "outcome_col")
+    @classmethod
+    def validate_non_empty_column_name(cls, v: Any, info: Any) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError(f"{info.field_name} must be a non-empty string.")
+        return v.strip()
+
+    @field_validator("confounder_cols")
+    @classmethod
+    def validate_confounders(cls, v: Any) -> List[str]:
+        if not isinstance(v, list):
+            raise ValueError("confounder_cols must be a list of column names.")
+        if len(v) == 0:
+            raise ValueError("confounder_cols must contain at least one column name.")
+        clean_cols = []
+        for idx, col in enumerate(v):
+            if not isinstance(col, str) or not col.strip():
+                raise ValueError(f"Confounder column at index {idx} must be a non-empty string.")
+            clean_cols.append(col.strip())
+        return clean_cols
+
+    @field_validator("drop_missing")
+    @classmethod
+    def validate_drop_missing(cls, v: Any) -> bool:
+        if not isinstance(v, bool):
+            raise ValueError("drop_missing must be a boolean.")
+        return v
+
+    @model_validator(mode="after")
+    def validate_distinct_roles(self) -> "DatasetRegressionAdjustedATERequest":
+        if self.treatment_col and self.outcome_col:
+            if self.treatment_col.strip() == self.outcome_col.strip():
+                raise ValueError(
+                    f"treatment_col and outcome_col cannot be the same column ('{self.treatment_col}')."
+                )
+        if self.confounder_cols:
+            if len(self.confounder_cols) != len(set(self.confounder_cols)):
+                raise ValueError(
+                    f"confounder_cols contains duplicate column names: {self.confounder_cols}."
+                )
+            for col in self.confounder_cols:
+                if self.treatment_col and col == self.treatment_col.strip():
+                    raise ValueError(
+                        f"Confounder column '{col}' cannot also be the treatment column."
+                    )
+                if self.outcome_col and col == self.outcome_col.strip():
+                    raise ValueError(
+                        f"Confounder column '{col}' cannot also be the outcome column."
+                    )
+        return self
+
+
+class DatasetCausalRegressionAdjustedATEResponse(CausalRegressionAdjustedATEResponse):
+    dataset_id: str = Field(..., description="Unique opaque dataset identifier")
+    dataset_filename: str = Field(..., description="Original filename of the stored dataset evaluated")
+    total_dataset_rows: int = Field(..., description="Total rows in the stored dataset before dropping missing values")
+
+
+@app.post(
+    "/api/dataset/{dataset_id}/causal/regression-adjusted-ate",
+    response_model=DatasetCausalRegressionAdjustedATEResponse,
+    tags=["Causal Inference", "Datasets"],
+    summary="Estimate regression-adjusted ATE for a stored dataset",
+)
+async def dataset_regression_adjusted_ate_endpoint(
+    dataset_id: str,
+    payload: DatasetRegressionAdjustedATERequest,
+) -> Dict[str, Any]:
+    """Estimate the regression-adjusted Average Treatment Effect (ATE) for a cataloged dataset on disk.
+
+    Validates dataset access and column existence, loads only the relevant treatment,
+    outcome, and confounder columns into memory, enforces missing-data policy, and computes
+    G-computation counterfactual contrasts under an OLS outcome model.
+    """
+    dataset_meta = default_dataset_manager.get_dataset(dataset_id)
+    if dataset_meta is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Dataset '{dataset_id}' not found or has expired.",
+        )
+
+    file_path = default_dataset_manager.get_dataset_file_path(dataset_id)
+    if file_path is None or not file_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Dataset file for '{dataset_id}' is not available on disk.",
+        )
+
+    available_cols = [c.name for c in dataset_meta.columns]
+    if payload.treatment_col not in available_cols:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=(
+                f"Treatment column '{payload.treatment_col}' not found in dataset. "
+                f"Available columns: {available_cols}"
+            ),
+        )
+    if payload.outcome_col not in available_cols:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=(
+                f"Outcome column '{payload.outcome_col}' not found in dataset. "
+                f"Available columns: {available_cols}"
+            ),
+        )
+    for c_col in payload.confounder_cols:
+        if c_col not in available_cols:
+            raise HTTPException(
+                status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+                detail=(
+                    f"Confounder column '{c_col}' not found in dataset. "
+                    f"Available columns: {available_cols}"
+                ),
+            )
+
+    if dataset_meta.row_count == 0:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail="Dataset is empty (0 rows). Causal inference requires observations in both treatment groups.",
+        )
+
+    cols_to_read = [payload.treatment_col, payload.outcome_col] + payload.confounder_cols
+
+    try:
+        df = pd.read_csv(
+            file_path,
+            usecols=cols_to_read,
+            na_values=list(MISSING_TOKENS),
+            keep_default_na=True,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=f"Failed to read dataset columns: {exc}",
+        )
+
+    if df.empty:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail="Dataset is empty (0 rows). Causal inference requires observations in both treatment groups.",
+        )
+
+    resolved_treated = _coerce_label_to_series_dtype(payload.treated_value, df[payload.treatment_col])
+    resolved_untreated = _coerce_label_to_series_dtype(payload.untreated_value, df[payload.treatment_col])
+
+    try:
+        results = estimate_regression_adjusted_ate(
+            data=df,
+            treatment_col=payload.treatment_col,
+            outcome_col=payload.outcome_col,
+            confounder_cols=payload.confounder_cols,
+            treated_value=resolved_treated,
+            untreated_value=resolved_untreated,
+            drop_missing=payload.drop_missing,
+        )
+        results["dataset_id"] = dataset_id
+        results["dataset_filename"] = dataset_meta.filename
+        results["total_dataset_rows"] = dataset_meta.row_count
+        return _sanitize_for_json(results)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=str(exc),
+        )
+
+
 
 class CausalPropensityScoreRequest(BaseModel):
     data: List[Dict[str, Any]] = Field(
