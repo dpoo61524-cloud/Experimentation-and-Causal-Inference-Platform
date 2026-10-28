@@ -190,6 +190,67 @@ document.addEventListener('DOMContentLoaded', function () {
     const resIptwInterpretationText = document.getElementById('res-iptw-interpretation-text');
     const resIptwAssumptionsText = document.getElementById('res-iptw-assumptions-text');
 
+    // Section 6: Difference-in-Differences Elements
+    const didStatusBanner = document.getElementById('did-status-banner');
+    const didUnloadedNotice = document.getElementById('did-unloaded-notice');
+    const didFormContainer = document.getElementById('did-form-container');
+    const didDatasetName = document.getElementById('did-dataset-name');
+    const didDatasetId = document.getElementById('did-dataset-id');
+    const didDatasetRows = document.getElementById('did-dataset-rows');
+    const didDatasetCols = document.getElementById('did-dataset-cols');
+    const didTreatmentSelect = document.getElementById('did-treatment-select');
+    const didTimeSelect = document.getElementById('did-time-select');
+    const didOutcomeSelect = document.getElementById('did-outcome-select');
+    const didTreatedValInput = document.getElementById('did-treated-val-input');
+    const didControlValInput = document.getElementById('did-control-val-input');
+    const didPreValInput = document.getElementById('did-pre-val-input');
+    const didPostValInput = document.getElementById('did-post-val-input');
+    const didDropMissingCheckbox = document.getElementById('did-drop-missing-checkbox');
+    const runDidBtn = document.getElementById('run-did-btn');
+
+    // Section 6: Results Elements
+    const didResultsPanel = document.getElementById('did-results-panel');
+    const resDidDatasetName = document.getElementById('res-did-dataset-name');
+    const resDidTotalRows = document.getElementById('res-did-total-rows');
+    const resDidEvalRows = document.getElementById('res-did-eval-rows');
+    const resDidDroppedRows = document.getElementById('res-did-dropped-rows');
+    const resDidEstimate = document.getElementById('res-did-estimate');
+    const resDidTreatmentChange = document.getElementById('res-did-treatment-change');
+    const resDidTreatmentSub = document.getElementById('res-did-treatment-sub');
+    const resDidControlChange = document.getElementById('res-did-control-change');
+    const resDidControlSub = document.getElementById('res-did-control-sub');
+    const resDidNTotal = document.getElementById('res-did-n-total');
+    const resDidCellSummarySub = document.getElementById('res-did-cell-summary-sub');
+
+    // 2x2 Table Elements
+    const didRowTLabel = document.getElementById('did-row-t-label');
+    const didValTPre = document.getElementById('did-val-t-pre');
+    const didValTPost = document.getElementById('did-val-t-post');
+    const didValTDelta = document.getElementById('did-val-t-delta');
+    const didCntTPre = document.getElementById('did-cnt-t-pre');
+    const didCntTPost = document.getElementById('did-cnt-t-post');
+    const didCntTTotal = document.getElementById('did-cnt-t-total');
+
+    const didRowCLabel = document.getElementById('did-row-c-label');
+    const didValCPre = document.getElementById('did-val-c-pre');
+    const didValCPost = document.getElementById('did-val-c-post');
+    const didValCDelta = document.getElementById('did-val-c-delta');
+    const didCntCPre = document.getElementById('did-cnt-c-pre');
+    const didCntCPost = document.getElementById('did-cnt-c-post');
+    const didCntCTotal = document.getElementById('did-cnt-c-total');
+
+    const didValDoubleDiff = document.getElementById('did-val-double-diff');
+    const didCntAllPre = document.getElementById('did-cnt-all-pre');
+    const didCntAllPost = document.getElementById('did-cnt-all-post');
+    const didCntGrandTotal = document.getElementById('did-cnt-grand-total');
+
+    const resDidCfgTreated = document.getElementById('res-did-cfg-treated');
+    const resDidCfgControl = document.getElementById('res-did-cfg-control');
+    const resDidCfgPre = document.getElementById('res-did-cfg-pre');
+    const resDidCfgPost = document.getElementById('res-did-cfg-post');
+    const resDidInterpretationText = document.getElementById('res-did-interpretation-text');
+    const resDidAssumptionsText = document.getElementById('res-did-assumptions-text');
+
     // Active session dataset metadata
     let currentDataset = null;
 
@@ -439,6 +500,7 @@ document.addEventListener('DOMContentLoaded', function () {
         setupRegAnalysis(data);
         setupPsAnalysis(data);
         setupIptwAnalysis(data);
+        setupDidAnalysis(data);
     }
 
     // --- 6. Causal Analysis (Unadjusted ATE) Logic ---
@@ -1839,6 +1901,324 @@ document.addEventListener('DOMContentLoaded', function () {
         }
         if (resIptwAssumptionsText) {
             resIptwAssumptionsText.textContent = r.assumptions || 'No identification assumptions documented.';
+        }
+    }
+
+    // --- 10. Causal Analysis: Difference-in-Differences (DiD) Logic ---
+    function showDidStatus(message, type) {
+        if (!didStatusBanner) return;
+        didStatusBanner.className = 'status-indicator status-visible status-' + type;
+        didStatusBanner.textContent = message;
+    }
+
+    function clearDidStatus() {
+        if (!didStatusBanner) return;
+        didStatusBanner.className = 'status-indicator';
+        didStatusBanner.textContent = '';
+    }
+
+    function setupDidAnalysis(data) {
+        if (!data || !data.columns) return;
+        if (didUnloadedNotice) didUnloadedNotice.style.display = 'none';
+        if (didFormContainer) didFormContainer.style.display = 'block';
+        if (didResultsPanel) didResultsPanel.style.display = 'none';
+        clearDidStatus();
+
+        if (didDatasetName) didDatasetName.textContent = data.filename + (data.is_benchmark ? ' [Benchmark]' : '');
+        if (didDatasetId) didDatasetId.textContent = data.dataset_id;
+        if (didDatasetRows) didDatasetRows.textContent = formatNumber(data.row_count);
+        if (didDatasetCols) didDatasetCols.textContent = formatNumber(data.column_count);
+
+        // 1. Populate Treatment Select
+        if (didTreatmentSelect) {
+            didTreatmentSelect.innerHTML = '<option value="">-- Choose treatment column --</option>';
+            let defaultTreatment = '';
+            data.columns.forEach(function (col) {
+                const optT = document.createElement('option');
+                optT.value = col.name;
+                optT.textContent = col.name + ' (' + col.inferred_type + ')';
+                didTreatmentSelect.appendChild(optT);
+
+                const nameLower = col.name.toLowerCase();
+                if (!defaultTreatment && (col.inferred_type === 'boolean' || nameLower === 'treatment' || nameLower === 'cohort' || nameLower === 'group' || nameLower === 'mens')) {
+                    defaultTreatment = col.name;
+                }
+            });
+            if (defaultTreatment) didTreatmentSelect.value = defaultTreatment;
+        }
+
+        // 2. Populate Time Select
+        if (didTimeSelect) {
+            didTimeSelect.innerHTML = '<option value="">-- Choose time period column --</option>';
+            let defaultTime = '';
+            data.columns.forEach(function (col) {
+                const optTime = document.createElement('option');
+                optTime.value = col.name;
+                optTime.textContent = col.name + ' (' + col.inferred_type + ')';
+                didTimeSelect.appendChild(optTime);
+
+                const nameLower = col.name.toLowerCase();
+                if (!defaultTime && (nameLower === 'time' || nameLower === 'period' || nameLower === 'wave' || nameLower === 'post' || nameLower === 'year' || nameLower === 'date')) {
+                    defaultTime = col.name;
+                }
+            });
+            if (defaultTime) didTimeSelect.value = defaultTime;
+        }
+
+        // 3. Populate Outcome Select
+        if (didOutcomeSelect) {
+            didOutcomeSelect.innerHTML = '<option value="">-- Choose outcome column --</option>';
+            let defaultOutcome = '';
+            data.columns.forEach(function (col) {
+                const optO = document.createElement('option');
+                optO.value = col.name;
+                optO.textContent = col.name + ' (' + col.inferred_type + ')';
+                didOutcomeSelect.appendChild(optO);
+
+                const nameLower = col.name.toLowerCase();
+                if (!defaultOutcome && (col.inferred_type === 'continuous' || col.inferred_type === 'integer') &&
+                    (nameLower === 'spend' || nameLower === 'outcome' || nameLower === 'y' || nameLower === 'conversion' || nameLower === 'sales' || nameLower === 'val')) {
+                    defaultOutcome = col.name;
+                }
+            });
+            if (defaultOutcome) didOutcomeSelect.value = defaultOutcome;
+        }
+
+        // Reset inputs
+        if (didTreatedValInput) didTreatedValInput.value = '';
+        if (didControlValInput) didControlValInput.value = '';
+        if (didPreValInput) didPreValInput.value = '';
+        if (didPostValInput) didPostValInput.value = '';
+        if (didDropMissingCheckbox) didDropMissingCheckbox.checked = false;
+
+        validateDidForm();
+    }
+
+    function validateDidForm() {
+        if (!currentDataset) {
+            if (runDidBtn) runDidBtn.disabled = true;
+            return false;
+        }
+
+        const tCol = didTreatmentSelect ? didTreatmentSelect.value : '';
+        const timeCol = didTimeSelect ? didTimeSelect.value : '';
+        const oCol = didOutcomeSelect ? didOutcomeSelect.value : '';
+
+        if (!tCol || !timeCol || !oCol) {
+            clearDidStatus();
+            if (runDidBtn) runDidBtn.disabled = true;
+            return false;
+        }
+
+        if (tCol === timeCol) {
+            showDidStatus('Treatment and Time Period cannot be the same column ("' + tCol + '").', 'error');
+            if (runDidBtn) runDidBtn.disabled = true;
+            return false;
+        }
+
+        if (tCol === oCol) {
+            showDidStatus('Treatment and Outcome cannot be the same column ("' + tCol + '").', 'error');
+            if (runDidBtn) runDidBtn.disabled = true;
+            return false;
+        }
+
+        if (timeCol === oCol) {
+            showDidStatus('Time Period and Outcome cannot be the same column ("' + timeCol + '").', 'error');
+            if (runDidBtn) runDidBtn.disabled = true;
+            return false;
+        }
+
+        // Check label equality if specified
+        const treatedVal = didTreatedValInput ? didTreatedValInput.value.trim() : '';
+        const controlVal = didControlValInput ? didControlValInput.value.trim() : '';
+        if (treatedVal && controlVal && treatedVal === controlVal) {
+            showDidStatus('Treated label and Control label cannot be identical ("' + treatedVal + '").', 'error');
+            if (runDidBtn) runDidBtn.disabled = true;
+            return false;
+        }
+
+        const preVal = didPreValInput ? didPreValInput.value.trim() : '';
+        const postVal = didPostValInput ? didPostValInput.value.trim() : '';
+        if (preVal && postVal && preVal === postVal) {
+            showDidStatus('Pre-period label and Post-period label cannot be identical ("' + preVal + '").', 'error');
+            if (runDidBtn) runDidBtn.disabled = true;
+            return false;
+        }
+
+        clearDidStatus();
+        if (runDidBtn) runDidBtn.disabled = false;
+        return true;
+    }
+
+    if (didTreatmentSelect) {
+        didTreatmentSelect.addEventListener('change', validateDidForm);
+    }
+    if (didTimeSelect) {
+        didTimeSelect.addEventListener('change', validateDidForm);
+    }
+    if (didOutcomeSelect) {
+        didOutcomeSelect.addEventListener('change', validateDidForm);
+    }
+    if (didTreatedValInput) {
+        didTreatedValInput.addEventListener('input', validateDidForm);
+    }
+    if (didControlValInput) {
+        didControlValInput.addEventListener('input', validateDidForm);
+    }
+    if (didPreValInput) {
+        didPreValInput.addEventListener('input', validateDidForm);
+    }
+    if (didPostValInput) {
+        didPostValInput.addEventListener('input', validateDidForm);
+    }
+
+    if (runDidBtn) {
+        runDidBtn.addEventListener('click', function () {
+            if (!validateDidForm()) return;
+            if (!currentDataset) {
+                showDidStatus('Please select or upload a dataset first.', 'error');
+                return;
+            }
+
+            const tCol = didTreatmentSelect.value;
+            const timeCol = didTimeSelect.value;
+            const oCol = didOutcomeSelect.value;
+
+            const payload = {
+                treatment_col: tCol,
+                time_col: timeCol,
+                outcome_col: oCol,
+                drop_missing: didDropMissingCheckbox ? didDropMissingCheckbox.checked : false,
+            };
+
+            const treatedVal = didTreatedValInput ? didTreatedValInput.value.trim() : '';
+            if (treatedVal !== '') payload.treated_value = treatedVal;
+
+            const controlVal = didControlValInput ? didControlValInput.value.trim() : '';
+            if (controlVal !== '') payload.control_value = controlVal;
+
+            const preVal = didPreValInput ? didPreValInput.value.trim() : '';
+            if (preVal !== '') payload.pre_value = preVal;
+
+            const postVal = didPostValInput ? didPostValInput.value.trim() : '';
+            if (postVal !== '') payload.post_value = postVal;
+
+            runDidBtn.disabled = true;
+            if (didResultsPanel) didResultsPanel.style.display = 'none';
+            showDidStatus('Evaluating 2×2 Difference-in-Differences sample means and effect... Please wait.', 'info');
+
+            fetch('/api/dataset/' + encodeURIComponent(currentDataset.dataset_id) + '/causal/difference-in-differences', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                },
+                body: JSON.stringify(payload),
+            })
+                .then(function (res) {
+                    if (!res.ok) {
+                        return res.json().then(function (err) {
+                            throw new Error(err.detail || 'DiD request failed with HTTP ' + res.status);
+                        });
+                    }
+                    return res.json();
+                })
+                .then(function (results) {
+                    renderDidResults(results);
+                    showDidStatus('Difference-in-Differences analysis complete: evaluated ' + formatNumber(results.n_total) + ' observations across 4 cells from ' + results.dataset_filename + '.', 'success');
+                })
+                .catch(function (err) {
+                    showDidStatus('DiD Analysis Error: ' + err.message, 'error');
+                })
+                .finally(function () {
+                    runDidBtn.disabled = false;
+                });
+        });
+    }
+
+    function renderDidResults(r) {
+        if (!r) return;
+        if (didResultsPanel) didResultsPanel.style.display = 'block';
+
+        if (resDidDatasetName) resDidDatasetName.textContent = r.dataset_filename || '—';
+        if (resDidTotalRows) resDidTotalRows.textContent = formatNumber(r.total_dataset_rows);
+        if (resDidEvalRows) resDidEvalRows.textContent = formatNumber(r.n_total);
+        if (resDidDroppedRows) resDidDroppedRows.textContent = formatNumber(r.rows_dropped);
+
+        // Primary KPIs
+        if (resDidEstimate) {
+            const prefix = r.did_estimate > 0 ? '+' : '';
+            resDidEstimate.textContent = prefix + Number(r.did_estimate).toFixed(4);
+        }
+
+        if (resDidTreatmentChange) {
+            const prefix = r.treatment_change > 0 ? '+' : '';
+            resDidTreatmentChange.textContent = prefix + Number(r.treatment_change).toFixed(4);
+        }
+        if (resDidTreatmentSub) {
+            resDidTreatmentSub.textContent = Number(r.treatment_mean_post).toFixed(4) + ' (post) − ' + Number(r.treatment_mean_pre).toFixed(4) + ' (pre)';
+        }
+
+        if (resDidControlChange) {
+            const prefix = r.control_change > 0 ? '+' : '';
+            resDidControlChange.textContent = prefix + Number(r.control_change).toFixed(4);
+        }
+        if (resDidControlSub) {
+            resDidControlSub.textContent = Number(r.control_mean_post).toFixed(4) + ' (post) − ' + Number(r.control_mean_pre).toFixed(4) + ' (pre)';
+        }
+
+        if (resDidNTotal) {
+            resDidNTotal.textContent = formatNumber(r.n_total);
+        }
+        if (resDidCellSummarySub) {
+            resDidCellSummarySub.textContent = formatNumber(r.n_treated) + ' treated, ' + formatNumber(r.n_control) + ' control';
+        }
+
+        // 2x2 Table: Row T
+        if (didRowTLabel) didRowTLabel.textContent = 'Treated (' + r.treatment_col + ' = ' + String(r.treated_value) + ')';
+        if (didValTPre) didValTPre.textContent = (r.treatment_mean_pre !== null && r.treatment_mean_pre !== undefined) ? Number(r.treatment_mean_pre).toFixed(4) : '—';
+        if (didValTPost) didValTPost.textContent = (r.treatment_mean_post !== null && r.treatment_mean_post !== undefined) ? Number(r.treatment_mean_post).toFixed(4) : '—';
+        if (didValTDelta) {
+            const pfx = r.treatment_change > 0 ? '+' : '';
+            didValTDelta.textContent = pfx + Number(r.treatment_change).toFixed(4);
+        }
+        if (didCntTPre) didCntTPre.textContent = formatNumber(r.n_treatment_pre);
+        if (didCntTPost) didCntTPost.textContent = formatNumber(r.n_treatment_post);
+        if (didCntTTotal) didCntTTotal.textContent = formatNumber(r.n_treated);
+
+        // 2x2 Table: Row C
+        if (didRowCLabel) didRowCLabel.textContent = 'Control (' + r.treatment_col + ' = ' + String(r.control_value) + ')';
+        if (didValCPre) didValCPre.textContent = (r.control_mean_pre !== null && r.control_mean_pre !== undefined) ? Number(r.control_mean_pre).toFixed(4) : '—';
+        if (didValCPost) didValCPost.textContent = (r.control_mean_post !== null && r.control_mean_post !== undefined) ? Number(r.control_mean_post).toFixed(4) : '—';
+        if (didValCDelta) {
+            const pfx = r.control_change > 0 ? '+' : '';
+            didValCDelta.textContent = pfx + Number(r.control_change).toFixed(4);
+        }
+        if (didCntCPre) didCntCPre.textContent = formatNumber(r.n_control_pre);
+        if (didCntCPost) didCntCPost.textContent = formatNumber(r.n_control_post);
+        if (didCntCTotal) didCntCTotal.textContent = formatNumber(r.n_control);
+
+        // 2x2 Table: DiD Row
+        if (didValDoubleDiff) {
+            const pfx = r.did_estimate > 0 ? '+' : '';
+            didValDoubleDiff.textContent = pfx + Number(r.did_estimate).toFixed(4);
+        }
+        if (didCntAllPre) didCntAllPre.textContent = formatNumber(r.n_treatment_pre + r.n_control_pre);
+        if (didCntAllPost) didCntAllPost.textContent = formatNumber(r.n_treatment_post + r.n_control_post);
+        if (didCntGrandTotal) didCntGrandTotal.textContent = formatNumber(r.n_total);
+
+        // Resolved Configuration
+        if (resDidCfgTreated) resDidCfgTreated.textContent = String(r.treated_value);
+        if (resDidCfgControl) resDidCfgControl.textContent = String(r.control_value);
+        if (resDidCfgPre) resDidCfgPre.textContent = String(r.pre_value);
+        if (resDidCfgPost) resDidCfgPost.textContent = String(r.post_value);
+
+        // Narrative & Assumptions
+        if (resDidInterpretationText) {
+            resDidInterpretationText.textContent = r.interpretation || 'No interpretation provided.';
+        }
+        if (resDidAssumptionsText) {
+            resDidAssumptionsText.textContent = r.assumptions || 'No identification assumptions documented.';
         }
     }
 });

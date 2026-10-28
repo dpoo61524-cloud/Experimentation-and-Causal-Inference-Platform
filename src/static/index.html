@@ -32,7 +32,7 @@
 
         <!-- Stage Notice Banner -->
         <div class="info-banner" role="region" aria-label="Development Notice">
-            <strong>Stage 7.5B Active:</strong> Dataset ingestion, schema inspection, Unadjusted ATE, Regression-Adjusted ATE, Propensity Score Estimation, and Inverse Probability of Treatment Weighting (IPTW) ATE are fully operational. All statistical calculations are executed by the FastAPI causal engine.
+            <strong>Stage 7.6A Active:</strong> Dataset ingestion, schema inspection, Unadjusted ATE, Regression-Adjusted ATE, Propensity Score Estimation, Inverse Probability of Treatment Weighting (IPTW), and Difference-in-Differences (DiD) are fully operational. All statistical calculations are executed by the FastAPI causal engine.
         </div>
 
         <!-- Section 1: Dataset Ingestion & Schema Inspector -->
@@ -893,10 +893,228 @@
             </div>
         </section>
 
-        <!-- Section 6: Available Causal Analysis Methods -->
+        <!-- Section 6: Causal Analysis — Difference-in-Differences (DiD) -->
+        <section id="did-analysis-section" class="section-card" aria-labelledby="did-analysis-heading">
+            <div class="section-header">
+                <h3 id="did-analysis-heading">6. Causal Analysis: Difference-in-Differences (DiD)</h3>
+                <p>Estimate the causal treatment effect across two groups and two time periods by calculating the change over time in the treated group relative to the control group.</p>
+            </div>
+
+            <!-- Status Banner for DiD Analysis -->
+            <div id="did-status-banner" class="status-indicator" role="status" aria-live="polite"></div>
+
+            <!-- Unloaded State Notice -->
+            <div id="did-unloaded-notice" class="empty-state">
+                <p>No dataset selected for DiD analysis. Ingest a CSV dataset or load the Hillstrom benchmark above to enable Difference-in-Differences estimation.</p>
+            </div>
+
+            <!-- Interactive Analysis Form (Hidden until dataset loaded) -->
+            <div id="did-form-container" style="display: none;">
+                <!-- Active Dataset Context Badge -->
+                <div class="active-dataset-meta-box">
+                    <span class="meta-item"><strong>Active Dataset:</strong> <span id="did-dataset-name">—</span></span>
+                    <span class="meta-item"><strong>Dataset ID:</strong> <span id="did-dataset-id" class="code-id">—</span></span>
+                    <span class="meta-item"><strong>Total Records:</strong> <span id="did-dataset-rows">—</span></span>
+                    <span class="meta-item"><strong>Columns:</strong> <span id="did-dataset-cols">—</span></span>
+                </div>
+
+                <!-- Educational Notice Banner for DiD -->
+                <div class="info-banner" style="margin-top: 12px; margin-bottom: 14px;">
+                    <strong>Methodology &amp; Identification Assumptions:</strong> Difference-in-Differences identifies the causal treatment effect under the <strong>Parallel Trends</strong> assumption: in the absence of treatment, the average outcome in the treated group would have followed the same trajectory as the control group (&Delta;<sub>T</sub> = &Delta;<sub>C</sub>). Requires observations across all four 2&times;2 cells (Treated Pre/Post and Control Pre/Post) and assumes no anticipation, no concurrent differential shocks, and SUTVA.
+                </div>
+
+                <form id="did-analysis-form" class="analysis-form" onsubmit="return false;">
+                    <div class="form-grid">
+                        <!-- Treatment Column Selector -->
+                        <div class="form-group">
+                            <label for="did-treatment-select">
+                                Treatment Group Column <span class="required">*</span>
+                            </label>
+                            <select id="did-treatment-select" class="form-control" required>
+                                <option value="">-- Choose treatment column --</option>
+                            </select>
+                            <small class="form-hint">Binary column identifying treated vs. control observations.</small>
+                        </div>
+
+                        <!-- Time Period Column Selector -->
+                        <div class="form-group">
+                            <label for="did-time-select">
+                                Time Period Column <span class="required">*</span>
+                            </label>
+                            <select id="did-time-select" class="form-control" required>
+                                <option value="">-- Choose time period column --</option>
+                            </select>
+                            <small class="form-hint">Binary column identifying pre- vs. post-intervention periods.</small>
+                        </div>
+
+                        <!-- Outcome Column Selector -->
+                        <div class="form-group">
+                            <label for="did-outcome-select">
+                                Outcome Column (Y) <span class="required">*</span>
+                            </label>
+                            <select id="did-outcome-select" class="form-control" required>
+                                <option value="">-- Choose outcome column --</option>
+                            </select>
+                            <small class="form-hint">Continuous or integer numeric outcome variable.</small>
+                        </div>
+                    </div>
+
+                    <!-- Custom Value Overrides (Optional) -->
+                    <div class="form-group" style="margin-top: 14px;">
+                        <label>Optional Group &amp; Period Label Overrides</label>
+                        <p class="form-hint" style="margin-bottom: 8px;">Leave blank to automatically infer labels from the data (e.g. 1/0, True/False, or "post"/"pre").</p>
+                        <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px;">
+                            <div>
+                                <label for="did-treated-val-input" style="font-size: 11px; text-transform: none; color: var(--text-secondary);">Treated Value (T=1)</label>
+                                <input type="text" id="did-treated-val-input" class="form-control" placeholder="Auto-inferred" />
+                            </div>
+                            <div>
+                                <label for="did-control-val-input" style="font-size: 11px; text-transform: none; color: var(--text-secondary);">Control Value (T=0)</label>
+                                <input type="text" id="did-control-val-input" class="form-control" placeholder="Auto-inferred" />
+                            </div>
+                            <div>
+                                <label for="did-pre-val-input" style="font-size: 11px; text-transform: none; color: var(--text-secondary);">Pre-Period Value (t=0)</label>
+                                <input type="text" id="did-pre-val-input" class="form-control" placeholder="Auto-inferred" />
+                            </div>
+                            <div>
+                                <label for="did-post-val-input" style="font-size: 11px; text-transform: none; color: var(--text-secondary);">Post-Period Value (t=1)</label>
+                                <input type="text" id="did-post-val-input" class="form-control" placeholder="Auto-inferred" />
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Missing Data Policy Control -->
+                    <div class="form-group" style="margin-top: 14px;">
+                        <label class="checkbox-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                            <input type="checkbox" id="did-drop-missing-checkbox" />
+                            <span><strong>Explicit Missing Data Policy:</strong> Drop rows with missing values across analysis columns (default: reject missing data with HTTP 422).</span>
+                        </label>
+                    </div>
+
+                    <!-- Submission Action -->
+                    <div class="form-actions" style="margin-top: 16px;">
+                        <button id="run-did-btn" type="button" class="btn btn-primary" disabled>
+                            Estimate Difference-in-Differences Effect
+                        </button>
+                    </div>
+                </form>
+
+                <!-- DiD Results Panel (Hidden until calculation succeeds) -->
+                <div id="did-results-panel" style="display: none; margin-top: 20px;">
+                    <!-- Dataset Row Accounting Card -->
+                    <div class="active-dataset-meta-box" style="margin-bottom: 16px; background-color: var(--white-surface);">
+                        <span class="meta-item"><strong>Analyzed Dataset:</strong> <span id="res-did-dataset-name">—</span></span>
+                        <span class="meta-item"><strong>Total Stored Rows:</strong> <span id="res-did-total-rows">—</span></span>
+                        <span class="meta-item"><strong>Evaluated Observations:</strong> <span id="res-did-eval-rows">—</span></span>
+                        <span class="meta-item"><strong>Dropped Incomplete Rows:</strong> <span id="res-did-dropped-rows">—</span></span>
+                    </div>
+
+                    <!-- Primary KPI Grid -->
+                    <div class="results-kpi-grid">
+                        <!-- KPI 1: DiD Estimate -->
+                        <div class="res-kpi-card highlight-card">
+                            <div class="res-kpi-label">DiD Treatment Effect (&Delta;&Delta;)</div>
+                            <div id="res-did-estimate" class="res-kpi-val">—</div>
+                            <div class="res-kpi-sub">(&Delta;<sub>Treated</sub> &minus; &Delta;<sub>Control</sub>)</div>
+                        </div>
+
+                        <!-- KPI 2: Treatment Group Change -->
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Treatment Group Change (&Delta;<sub>T</sub>)</div>
+                            <div id="res-did-treatment-change" class="res-kpi-val">—</div>
+                            <div id="res-did-treatment-sub" class="res-kpi-sub">Post &minus; Pre</div>
+                        </div>
+
+                        <!-- KPI 3: Control Group Change -->
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Control Group Change (&Delta;<sub>C</sub>)</div>
+                            <div id="res-did-control-change" class="res-kpi-val">—</div>
+                            <div id="res-did-control-sub" class="res-kpi-sub">Post &minus; Pre</div>
+                        </div>
+
+                        <!-- KPI 4: Total Sample Size -->
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Total Observations (N)</div>
+                            <div id="res-did-n-total" class="res-kpi-val">—</div>
+                            <div id="res-did-cell-summary-sub" class="res-kpi-sub">Across 4 group-period cells</div>
+                        </div>
+                    </div>
+
+                    <!-- 2x2 Group-Period Sample Means and Cell Counts Table -->
+                    <div class="table-container" style="margin-top: 16px;">
+                        <h4 style="margin: 0 0 8px 0; font-size: 14px; font-weight: 600; color: var(--primary-charcoal);">
+                            2&times;2 Group-Period Outcome Means and Sample Counts
+                        </h4>
+                        <table id="did-2x2-table" class="summary-table">
+                            <thead>
+                                <tr>
+                                    <th>Group / Cohort</th>
+                                    <th style="text-align: right;">Pre-Intervention Mean (Y&#772;<sub>pre</sub>)</th>
+                                    <th style="text-align: right;">Post-Intervention Mean (Y&#772;<sub>post</sub>)</th>
+                                    <th style="text-align: right;">Time Difference (&Delta;)</th>
+                                    <th style="text-align: right;">Pre Count (N<sub>pre</sub>)</th>
+                                    <th style="text-align: right;">Post Count (N<sub>post</sub>)</th>
+                                    <th style="text-align: right;">Total (N)</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td id="did-row-t-label" style="font-weight: 600;">Treated Group</td>
+                                    <td id="did-val-t-pre" style="text-align: right; font-family: var(--font-mono);">—</td>
+                                    <td id="did-val-t-post" style="text-align: right; font-family: var(--font-mono);">—</td>
+                                    <td id="did-val-t-delta" style="text-align: right; font-family: var(--font-mono); font-weight: 600;">—</td>
+                                    <td id="did-cnt-t-pre" style="text-align: right; font-family: var(--font-mono);">—</td>
+                                    <td id="did-cnt-t-post" style="text-align: right; font-family: var(--font-mono);">—</td>
+                                    <td id="did-cnt-t-total" style="text-align: right; font-family: var(--font-mono);">—</td>
+                                </tr>
+                                <tr>
+                                    <td id="did-row-c-label" style="font-weight: 600;">Control Group</td>
+                                    <td id="did-val-c-pre" style="text-align: right; font-family: var(--font-mono);">—</td>
+                                    <td id="did-val-c-post" style="text-align: right; font-family: var(--font-mono);">—</td>
+                                    <td id="did-val-c-delta" style="text-align: right; font-family: var(--font-mono); font-weight: 600;">—</td>
+                                    <td id="did-cnt-c-pre" style="text-align: right; font-family: var(--font-mono);">—</td>
+                                    <td id="did-cnt-c-post" style="text-align: right; font-family: var(--font-mono);">—</td>
+                                    <td id="did-cnt-c-total" style="text-align: right; font-family: var(--font-mono);">—</td>
+                                </tr>
+                                <tr style="background-color: var(--warm-neutral-bg); font-weight: 700;">
+                                    <td>Difference-in-Differences (&Delta;<sub>T</sub> &minus; &Delta;<sub>C</sub>)</td>
+                                    <td style="text-align: right;">—</td>
+                                    <td style="text-align: right;">—</td>
+                                    <td id="did-val-double-diff" style="text-align: right; font-family: var(--font-mono); color: var(--deep-sage); font-size: 14px;">—</td>
+                                    <td id="did-cnt-all-pre" style="text-align: right; font-family: var(--font-mono);">—</td>
+                                    <td id="did-cnt-all-post" style="text-align: right; font-family: var(--font-mono);">—</td>
+                                    <td id="did-cnt-grand-total" style="text-align: right; font-family: var(--font-mono);">—</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- Resolved Label & Group Configuration -->
+                    <div class="active-dataset-meta-box" style="margin-top: 14px; background-color: var(--warm-neutral-bg);">
+                        <span class="meta-item"><strong>Treated Label:</strong> <code id="res-did-cfg-treated">—</code></span>
+                        <span class="meta-item"><strong>Control Label:</strong> <code id="res-did-cfg-control">—</code></span>
+                        <span class="meta-item"><strong>Pre-Period Label:</strong> <code id="res-did-cfg-pre">—</code></span>
+                        <span class="meta-item"><strong>Post-Period Label:</strong> <code id="res-did-cfg-post">—</code></span>
+                    </div>
+
+                    <!-- Interpretation & Assumptions Text Blocks -->
+                    <div class="interpretation-block">
+                        <h5>Statistical Interpretation</h5>
+                        <p id="res-did-interpretation-text">—</p>
+                    </div>
+
+                    <div class="assumptions-block">
+                        <h5>Identification Assumptions &amp; Methodological Limitations</h5>
+                        <p id="res-did-assumptions-text">—</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 7: Available Causal Analysis Methods -->
         <section class="section-card" aria-labelledby="methods-heading">
             <div class="section-header">
-                <h3 id="methods-heading">6. Available Causal Analysis Methods</h3>
+                <h3 id="methods-heading">7. Available Causal Analysis Methods</h3>
                 <p>Six estimators designed for experimental and observational causal inference with explicit identification assumptions.</p>
             </div>
 

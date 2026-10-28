@@ -383,6 +383,8 @@ def test_full_row_accounting_hillstrom_benchmark():
 
     assert data["total_dataset_rows"] == 64000
     assert data["n_total"] == 64000
+    assert data["n_treated"] == 35266
+    assert data["n_control"] == 28734
     assert data["n_treated"] + data["n_control"] == 64000
     assert data["rows_dropped"] == 0
     assert len(data["propensity_scores"]) == 64000

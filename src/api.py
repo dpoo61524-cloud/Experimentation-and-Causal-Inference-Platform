@@ -2854,6 +2854,251 @@ async def difference_in_differences_endpoint(
         )
 
 
+class DatasetDifferenceInDifferencesRequest(BaseModel):
+    treatment_col: str = Field(
+        ...,
+        description="Name of the binary treatment-group column in the dataset.",
+        examples=["treatment"],
+    )
+    time_col: Optional[str] = Field(
+        None,
+        description="Name of the two-period time indicator column in the dataset (pre/post).",
+        examples=["time"],
+    )
+    time_period_col: Optional[str] = Field(
+        None,
+        description="Alias for time_col.",
+        examples=["time"],
+    )
+    outcome_col: str = Field(
+        ...,
+        description="Name of the numeric outcome column in the dataset.",
+        examples=["outcome"],
+    )
+    treated_value: Optional[Any] = Field(
+        None,
+        description="Label identifying the treated group. Inferred automatically if omitted.",
+        examples=[1],
+    )
+    control_value: Optional[Any] = Field(
+        None,
+        description="Label identifying the control group. Inferred automatically if omitted.",
+        examples=[0],
+    )
+    untreated_value: Optional[Any] = Field(
+        None,
+        description="Alias for control_value.",
+        examples=[0],
+    )
+    pre_value: Optional[Any] = Field(
+        None,
+        description="Label identifying the pre-intervention period. Inferred automatically if omitted.",
+        examples=[0],
+    )
+    post_value: Optional[Any] = Field(
+        None,
+        description="Label identifying the post-intervention period. Inferred automatically if omitted.",
+        examples=[1],
+    )
+    pre_period_value: Optional[Any] = Field(
+        None,
+        description="Alias for pre_value.",
+        examples=[0],
+    )
+    post_period_value: Optional[Any] = Field(
+        None,
+        description="Alias for post_value.",
+        examples=[1],
+    )
+    drop_missing: bool = Field(
+        default=False,
+        description="Whether to explicitly drop rows with missing values in treatment, time, or outcome columns. Default is false.",
+        examples=[False],
+    )
+
+    @field_validator("treatment_col", "outcome_col")
+    @classmethod
+    def validate_required_column_names(cls, v: Any, info: Any) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError(f"{info.field_name} must be a non-empty string.")
+        return v.strip()
+
+    @field_validator("time_col", "time_period_col")
+    @classmethod
+    def validate_optional_time_column_name(cls, v: Any, info: Any) -> Optional[str]:
+        if v is None:
+            return None
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError(f"{info.field_name} must be a non-empty string when provided.")
+        return v.strip()
+
+    @field_validator("drop_missing")
+    @classmethod
+    def validate_drop_missing(cls, v: Any) -> bool:
+        if not isinstance(v, bool):
+            raise ValueError("drop_missing must be a boolean.")
+        return v
+
+    @model_validator(mode="after")
+    def validate_model_consistency(self) -> "DatasetDifferenceInDifferencesRequest":
+        # Resolve time column alias
+        actual_time_col = self.time_col or self.time_period_col
+        if actual_time_col is None:
+            raise ValueError("time_col (or time_period_col) must be provided as a non-empty string.")
+        self.time_col = actual_time_col
+
+        # Role conflicts
+        if self.treatment_col == self.outcome_col:
+            raise ValueError(
+                f"treatment_col and outcome_col cannot be the same column ('{self.treatment_col}')."
+            )
+        if self.time_col == self.outcome_col:
+            raise ValueError(
+                f"time_col and outcome_col cannot be the same column ('{self.time_col}')."
+            )
+        if self.treatment_col == self.time_col:
+            raise ValueError(
+                f"treatment_col and time_col cannot be the same column ('{self.treatment_col}')."
+            )
+
+        # Label equality checks
+        actual_control = self.control_value if self.control_value is not None else self.untreated_value
+        if self.treated_value is not None and actual_control is not None and self.treated_value == actual_control:
+            raise ValueError("treated_value and control_value cannot be identical.")
+
+        actual_pre = self.pre_value if self.pre_value is not None else self.pre_period_value
+        actual_post = self.post_value if self.post_value is not None else self.post_period_value
+        if actual_pre is not None and actual_post is not None and actual_pre == actual_post:
+            raise ValueError("pre_value and post_value cannot be identical.")
+
+        return self
+
+
+class DatasetCausalDifferenceInDifferencesResponse(CausalDifferenceInDifferencesResponse):
+    dataset_id: str = Field(..., description="Unique opaque dataset identifier")
+    dataset_filename: str = Field(..., description="Original filename of the stored dataset evaluated")
+    total_dataset_rows: int = Field(..., description="Total rows in the stored dataset before dropping missing values")
+
+
+@app.post(
+    "/api/dataset/{dataset_id}/causal/difference-in-differences",
+    response_model=DatasetCausalDifferenceInDifferencesResponse,
+    tags=["Causal Inference", "Datasets"],
+    summary="Estimate Difference-in-Differences treatment effect for a stored dataset",
+)
+async def dataset_difference_in_differences_endpoint(
+    dataset_id: str,
+    payload: DatasetDifferenceInDifferencesRequest,
+) -> Dict[str, Any]:
+    """Estimate treatment effect using Difference-in-Differences (DiD) on a stored dataset.
+
+    Validates dataset access and column existence, loads only the treatment, time, and outcome
+    columns from disk, enforces missing data policy, resolves group and period labels,
+    verifies that all four group-period cells contain observations, and computes the canonical
+    2x2 Difference-in-Differences point estimate:
+    DiD = (Ybar_{T,post} - Ybar_{T,pre}) - (Ybar_{C,post} - Ybar_{C,pre}).
+    """
+    dataset_meta = default_dataset_manager.get_dataset(dataset_id)
+    if dataset_meta is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Dataset '{dataset_id}' not found or has expired.",
+        )
+
+    file_path = default_dataset_manager.get_dataset_file_path(dataset_id)
+    if file_path is None or not file_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Dataset file for '{dataset_id}' is not available on disk.",
+        )
+
+    available_cols = [c.name for c in dataset_meta.columns]
+    actual_time_col = payload.time_col or payload.time_period_col
+
+    if payload.treatment_col not in available_cols:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=(
+                f"Treatment column '{payload.treatment_col}' not found in dataset. "
+                f"Available columns: {available_cols}"
+            ),
+        )
+    if actual_time_col not in available_cols:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=(
+                f"Time column '{actual_time_col}' not found in dataset. "
+                f"Available columns: {available_cols}"
+            ),
+        )
+    if payload.outcome_col not in available_cols:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=(
+                f"Outcome column '{payload.outcome_col}' not found in dataset. "
+                f"Available columns: {available_cols}"
+            ),
+        )
+
+    if dataset_meta.row_count == 0:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail="Dataset is empty (0 rows). Difference-in-Differences requires observations in all four cells.",
+        )
+
+    cols_to_read = [payload.treatment_col, actual_time_col, payload.outcome_col]
+
+    try:
+        df = pd.read_csv(
+            file_path,
+            usecols=cols_to_read,
+            na_values=list(MISSING_TOKENS),
+            keep_default_na=True,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=f"Failed to read dataset columns: {exc}",
+        )
+
+    if df.empty:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail="Dataset is empty (0 rows). Difference-in-Differences requires observations in all four cells.",
+        )
+
+    actual_control = payload.control_value if payload.control_value is not None else payload.untreated_value
+    actual_pre = payload.pre_value if payload.pre_value is not None else payload.pre_period_value
+    actual_post = payload.post_value if payload.post_value is not None else payload.post_period_value
+
+    resolved_treated = _coerce_label_to_series_dtype(payload.treated_value, df[payload.treatment_col])
+    resolved_control = _coerce_label_to_series_dtype(actual_control, df[payload.treatment_col])
+    resolved_pre = _coerce_label_to_series_dtype(actual_pre, df[actual_time_col])
+    resolved_post = _coerce_label_to_series_dtype(actual_post, df[actual_time_col])
+
+    try:
+        results = estimate_difference_in_differences(
+            data=df,
+            treatment_col=payload.treatment_col,
+            time_col=actual_time_col,
+            outcome_col=payload.outcome_col,
+            treated_value=resolved_treated,
+            control_value=resolved_control,
+            pre_value=resolved_pre,
+            post_value=resolved_post,
+            drop_missing=payload.drop_missing,
+        )
+        results["dataset_id"] = dataset_id
+        results["dataset_filename"] = dataset_meta.filename
+        results["total_dataset_rows"] = dataset_meta.row_count
+        return _sanitize_for_json(results)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=str(exc),
+        )
+
+
 
 class CausalSensitivityAnalysisRequest(BaseModel):
     data: Optional[List[Dict[str, Any]]] = Field(
