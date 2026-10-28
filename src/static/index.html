@@ -32,7 +32,7 @@
 
         <!-- Stage Notice Banner -->
         <div class="info-banner" role="region" aria-label="Development Notice">
-            <strong>Stage 7.4B Active:</strong> Dataset ingestion, schema inspection, Unadjusted ATE, and Regression-Adjusted ATE (G-computation) from stored datasets are fully operational. All statistical calculations are executed by the FastAPI causal engine.
+            <strong>Stage 7.5A Active:</strong> Dataset ingestion, schema inspection, Unadjusted ATE, Regression-Adjusted ATE, and Propensity Score Estimation with Overlap Diagnostics are fully operational. All statistical calculations are executed by the FastAPI causal engine.
         </div>
 
         <!-- Section 1: Dataset Ingestion & Schema Inspector -->
@@ -467,10 +467,215 @@
             </div>
         </section>
 
-        <!-- Section 4: Available Causal Analysis Methods -->
+        <!-- Section 4: Causal Diagnostics — Propensity Score Estimation & Overlap -->
+        <section id="propensity-analysis-section" class="section-card" aria-labelledby="ps-analysis-heading">
+            <div class="section-header">
+                <h3 id="ps-analysis-heading">4. Causal Diagnostics: Propensity Score Estimation &amp; Overlap</h3>
+                <p>Model treatment assignment probabilities e(X) = P(T=1 | X) via logistic regression to evaluate common support, positivity, and pre-adjustment covariate balance.</p>
+            </div>
+
+            <!-- Status Banner for Propensity Score Estimation -->
+            <div id="ps-status-banner" class="status-indicator" role="status" aria-live="polite"></div>
+
+            <!-- Unloaded State Notice -->
+            <div id="ps-unloaded-notice" class="empty-state">
+                <p>No dataset selected for propensity score estimation. Ingest a CSV dataset or load the Hillstrom benchmark above to enable propensity score modeling.</p>
+            </div>
+
+            <!-- Interactive Analysis Form (Hidden until dataset loaded) -->
+            <div id="ps-form-container" style="display: none;">
+                <!-- Active Dataset Context Badge -->
+                <div class="active-dataset-meta-box">
+                    <span class="meta-item"><strong>Active Dataset:</strong> <span id="ps-dataset-name">—</span></span>
+                    <span class="meta-item"><strong>Dataset ID:</strong> <span id="ps-dataset-id" class="code-id">—</span></span>
+                    <span class="meta-item"><strong>Total Records:</strong> <span id="ps-dataset-rows">—</span></span>
+                    <span class="meta-item"><strong>Columns:</strong> <span id="ps-dataset-cols">—</span></span>
+                </div>
+
+                <!-- Educational Notice Banner distinguishing propensity score from causal effect -->
+                <div class="info-banner" style="margin-bottom: 16px; border-left-color: var(--sage-accent);">
+                    <strong>Diagnostic Role:</strong> Propensity scores represent conditional probabilities of treatment assignment, <em>not</em> treatment effect estimates. They are used to diagnose common support (positivity) and covariate imbalance before applying downstream causal methods (such as matching, IPTW, or stratification).
+                </div>
+
+                <form id="ps-analysis-form" class="causal-analysis-form" onsubmit="return false;">
+                    <div class="form-row-grid">
+                        <!-- Treatment Column Select -->
+                        <div class="form-group">
+                            <label for="ps-treatment-select">Treatment Column (Binary) <span class="required-star">*</span></label>
+                            <select id="ps-treatment-select" class="form-select" required>
+                                <option value="">-- Choose treatment column --</option>
+                            </select>
+                            <span class="field-hint">Binary indicator variable modeled as dependent variable in logit regression.</span>
+                        </div>
+
+                        <!-- Near-Boundary Diagnostic Thresholds -->
+                        <div class="form-group">
+                            <label>Boundary Diagnostics Thresholds</label>
+                            <div style="display: flex; gap: 10px;">
+                                <div style="flex: 1;">
+                                    <label for="ps-near-zero-input" style="font-size: 11px; color: var(--text-secondary); margin-bottom: 2px;">Near Zero (&le;)</label>
+                                    <input type="number" id="ps-near-zero-input" class="form-input" value="0.05" min="0" max="0.5" step="0.01">
+                                </div>
+                                <div style="flex: 1;">
+                                    <label for="ps-near-one-input" style="font-size: 11px; color: var(--text-secondary); margin-bottom: 2px;">Near One (&ge;)</label>
+                                    <input type="number" id="ps-near-one-input" class="form-input" value="0.95" min="0.5" max="1" step="0.01">
+                                </div>
+                            </div>
+                            <span class="field-hint">Flag extreme probabilities indicating potential positivity violations.</span>
+                        </div>
+                    </div>
+
+                    <!-- Confounders Multi-Selection Checkbox Grid -->
+                    <div class="form-group" style="margin-top: 14px;">
+                        <label>Confounder / Covariate Predictors <span class="required-star">*</span> (Select at least one)</label>
+                        <div id="ps-confounders-container" class="confounders-checkbox-grid" role="group" aria-label="Select confounder columns for propensity score model">
+                            <!-- Populated dynamically with checkboxes -->
+                        </div>
+                        <span class="field-hint">Independent variables included in the logistic regression model of treatment assignment.</span>
+                    </div>
+
+                    <!-- Optional Labels Row -->
+                    <div class="form-row-grid" style="margin-top: 14px;">
+                        <div class="form-group">
+                            <label for="ps-treated-val-input">Treated Value Label (Optional)</label>
+                            <input type="text" id="ps-treated-val-input" class="form-input" placeholder="Auto-inferred if empty (e.g. 1)">
+                            <span class="field-hint">Leave blank to auto-infer from binary values.</span>
+                        </div>
+                        <div class="form-group">
+                            <label for="ps-untreated-val-input">Control / Untreated Value Label (Optional)</label>
+                            <input type="text" id="ps-untreated-val-input" class="form-input" placeholder="Auto-inferred if empty (e.g. 0)">
+                            <span class="field-hint">Leave blank to auto-infer from binary values.</span>
+                        </div>
+                    </div>
+
+                    <div class="form-checkbox-row">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="ps-drop-missing-checkbox">
+                            <span><strong>Explicitly drop rows with missing values</strong> (<code>drop_missing=true</code>)</span>
+                        </label>
+                        <p class="field-hint" style="margin-left: 23px; margin-top: 2px;">
+                            When unchecked (default), estimation fails cleanly if missing values exist in the chosen model columns.
+                        </p>
+                    </div>
+
+                    <div class="form-actions-row">
+                        <button type="submit" id="run-ps-btn" class="btn btn-primary" disabled>
+                            Estimate Propensity Scores &amp; Overlap
+                        </button>
+                    </div>
+                </form>
+
+                <!-- Results Display Panel (Hidden until estimation succeeds) -->
+                <div id="ps-results-panel" style="display: none;">
+                    <div class="results-header-block">
+                        <h4 style="font-size: 15px; font-weight: 600; color: var(--primary-charcoal); margin-bottom: 4px;">
+                            Propensity Score Distribution &amp; Common Support Diagnostics
+                        </h4>
+                        <p class="table-footnote">
+                            Estimated using binary logistic regression P(T=1 | X). Evaluates whether treated and control units share common covariate support.
+                        </p>
+                    </div>
+
+                    <!-- Dataset & Sample Accounting Banner -->
+                    <div class="accounting-card">
+                        <span class="acc-item"><strong>Evaluated Dataset:</strong> <span id="res-ps-dataset-name">—</span></span>
+                        <span class="acc-item"><strong>Total Stored Rows:</strong> <span id="res-ps-total-rows">—</span></span>
+                        <span class="acc-item"><strong>Evaluated Observations:</strong> <span id="res-ps-eval-rows">—</span></span>
+                        <span class="acc-item"><strong>Rows Dropped (Missing):</strong> <span id="res-ps-dropped-rows">—</span></span>
+                    </div>
+
+                    <!-- Primary Statistics KPI Grid -->
+                    <div class="results-kpi-grid">
+                        <div class="res-kpi-card highlight-card">
+                            <div class="res-kpi-label">Common Support Overlap</div>
+                            <div id="res-ps-overlap-status" class="res-kpi-val">—</div>
+                            <div id="res-ps-overlap-sub" class="res-kpi-sub">Positivity condition</div>
+                        </div>
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Common Support Range</div>
+                            <div id="res-ps-support-range" class="res-kpi-val" style="font-size: 14px;">—</div>
+                            <div class="res-kpi-sub">Shared probability interval</div>
+                        </div>
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Treated Score Range</div>
+                            <div id="res-ps-treated-range" class="res-kpi-val" style="font-size: 14px;">—</div>
+                            <div id="res-ps-treated-count-sub" class="res-kpi-sub">P(T=1 | X) for treated</div>
+                        </div>
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Control Score Range</div>
+                            <div id="res-ps-control-range" class="res-kpi-val" style="font-size: 14px;">—</div>
+                            <div id="res-ps-control-count-sub" class="res-kpi-sub">P(T=1 | X) for control</div>
+                        </div>
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Near-Boundary Scores</div>
+                            <div id="res-ps-boundary-count" class="res-kpi-val">—</div>
+                            <div id="res-ps-boundary-sub" class="res-kpi-sub">Near 0 or near 1</div>
+                        </div>
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Model Pseudo-R&sup2;</div>
+                            <div id="res-ps-pseudo-r2" class="res-kpi-val">—</div>
+                            <div id="res-ps-converged-sub" class="res-kpi-sub">McFadden's Pseudo-R&sup2;</div>
+                        </div>
+                    </div>
+
+                    <!-- Pre-Adjustment Covariate Imbalance Table -->
+                    <div style="margin-bottom: 16px;">
+                        <h5 style="font-size: 13px; font-weight: 600; color: var(--primary-charcoal); margin-bottom: 6px;">
+                            Pre-Adjustment Covariate Imbalance (Standardized Mean Differences)
+                        </h5>
+                        <p class="table-footnote" style="margin-bottom: 8px;">
+                            Standardized Mean Difference (SMD) quantifies baseline imbalance. Absolute SMD &le; 0.10 indicates acceptable covariate balance.
+                        </p>
+                        <div class="table-container" style="max-height: 240px; overflow-y: auto;">
+                            <table class="data-table" id="ps-balance-table" aria-label="Covariate balance table">
+                                <thead>
+                                    <tr>
+                                        <th>Confounder</th>
+                                        <th>Type</th>
+                                        <th>Treated Mean</th>
+                                        <th>Control Mean</th>
+                                        <th>SMD</th>
+                                        <th>Baseline Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="ps-balance-tbody">
+                                    <!-- Populated dynamically -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Model Features & Specification Meta -->
+                    <div style="margin-bottom: 16px;">
+                        <h5 style="font-size: 13px; font-weight: 600; color: var(--primary-charcoal); margin-bottom: 6px;">
+                            Propensity Score Model Specifications
+                        </h5>
+                        <div class="active-dataset-meta-box" style="margin-bottom: 0;">
+                            <span class="meta-item"><strong>Model Type:</strong> <span id="res-ps-model-type">Logistic Regression (Logit)</span></span>
+                            <span class="meta-item"><strong>Numeric Confounders:</strong> <span id="res-ps-num-conf">—</span></span>
+                            <span class="meta-item"><strong>Categorical Confounders:</strong> <span id="res-ps-cat-conf">—</span></span>
+                            <span class="meta-item"><strong>Design Features:</strong> <span id="res-ps-features-list">—</span></span>
+                        </div>
+                    </div>
+
+                    <!-- Interpretation & Assumptions Text Blocks -->
+                    <div class="interpretation-block">
+                        <h5>Statistical Interpretation</h5>
+                        <p id="res-ps-interpretation-text">—</p>
+                    </div>
+
+                    <div class="assumptions-block">
+                        <h5>Identification Assumptions &amp; Positivity Limitations</h5>
+                        <p id="res-ps-assumptions-text">—</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 5: Available Causal Analysis Methods -->
         <section class="section-card" aria-labelledby="methods-heading">
             <div class="section-header">
-                <h3 id="methods-heading">4. Available Causal Analysis Methods</h3>
+                <h3 id="methods-heading">5. Available Causal Analysis Methods</h3>
                 <p>Six estimators designed for experimental and observational causal inference with explicit identification assumptions.</p>
             </div>
 

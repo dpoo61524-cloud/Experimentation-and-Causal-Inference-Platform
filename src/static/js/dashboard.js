@@ -103,6 +103,50 @@ document.addEventListener('DOMContentLoaded', function () {
     const resRegInterpretationText = document.getElementById('res-reg-interpretation-text');
     const resRegAssumptionsText = document.getElementById('res-reg-assumptions-text');
 
+    // Section 4: Causal Diagnostics (Propensity Score Estimation & Overlap) Elements
+    const psStatusBanner = document.getElementById('ps-status-banner');
+    const psUnloadedNotice = document.getElementById('ps-unloaded-notice');
+    const psFormContainer = document.getElementById('ps-form-container');
+    const psDatasetName = document.getElementById('ps-dataset-name');
+    const psDatasetId = document.getElementById('ps-dataset-id');
+    const psDatasetRows = document.getElementById('ps-dataset-rows');
+    const psDatasetCols = document.getElementById('ps-dataset-cols');
+
+    const psForm = document.getElementById('ps-analysis-form');
+    const psTreatmentSelect = document.getElementById('ps-treatment-select');
+    const psNearZeroInput = document.getElementById('ps-near-zero-input');
+    const psNearOneInput = document.getElementById('ps-near-one-input');
+    const psConfoundersContainer = document.getElementById('ps-confounders-container');
+    const psTreatedValInput = document.getElementById('ps-treated-val-input');
+    const psUntreatedValInput = document.getElementById('ps-untreated-val-input');
+    const psDropMissingCheckbox = document.getElementById('ps-drop-missing-checkbox');
+    const runPsBtn = document.getElementById('run-ps-btn');
+
+    // Section 4: Results Elements
+    const psResultsPanel = document.getElementById('ps-results-panel');
+    const resPsDatasetName = document.getElementById('res-ps-dataset-name');
+    const resPsTotalRows = document.getElementById('res-ps-total-rows');
+    const resPsEvalRows = document.getElementById('res-ps-eval-rows');
+    const resPsDroppedRows = document.getElementById('res-ps-dropped-rows');
+    const resPsOverlapStatus = document.getElementById('res-ps-overlap-status');
+    const resPsOverlapSub = document.getElementById('res-ps-overlap-sub');
+    const resPsSupportRange = document.getElementById('res-ps-support-range');
+    const resPsTreatedRange = document.getElementById('res-ps-treated-range');
+    const resPsTreatedCountSub = document.getElementById('res-ps-treated-count-sub');
+    const resPsControlRange = document.getElementById('res-ps-control-range');
+    const resPsControlCountSub = document.getElementById('res-ps-control-count-sub');
+    const resPsBoundaryCount = document.getElementById('res-ps-boundary-count');
+    const resPsBoundarySub = document.getElementById('res-ps-boundary-sub');
+    const resPsPseudoR2 = document.getElementById('res-ps-pseudo-r2');
+    const resPsConvergedSub = document.getElementById('res-ps-converged-sub');
+    const psBalanceTbody = document.getElementById('ps-balance-tbody');
+    const resPsModelType = document.getElementById('res-ps-model-type');
+    const resPsNumConf = document.getElementById('res-ps-num-conf');
+    const resPsCatConf = document.getElementById('res-ps-cat-conf');
+    const resPsFeaturesList = document.getElementById('res-ps-features-list');
+    const resPsInterpretationText = document.getElementById('res-ps-interpretation-text');
+    const resPsAssumptionsText = document.getElementById('res-ps-assumptions-text');
+
     // Active session dataset metadata
     let currentDataset = null;
 
@@ -350,6 +394,7 @@ document.addEventListener('DOMContentLoaded', function () {
         // Initialize causal analysis workflows for this dataset
         setupAteAnalysis(data);
         setupRegAnalysis(data);
+        setupPsAnalysis(data);
     }
 
     // --- 6. Causal Analysis (Unadjusted ATE) Logic ---
@@ -870,6 +915,408 @@ document.addEventListener('DOMContentLoaded', function () {
 
         if (resRegAssumptionsText) {
             resRegAssumptionsText.textContent = r.assumptions || 'No identification assumptions documented.';
+        }
+    }
+
+    // --- 8. Causal Diagnostics (Propensity Score Estimation) Logic (Stage 7.5A) ---
+    function showPsStatus(message, type) {
+        if (!psStatusBanner) return;
+        psStatusBanner.className = 'status-indicator status-visible status-' + type;
+        psStatusBanner.textContent = message;
+    }
+
+    function clearPsStatus() {
+        if (!psStatusBanner) return;
+        psStatusBanner.className = 'status-indicator';
+        psStatusBanner.textContent = '';
+    }
+
+    function setupPsAnalysis(data) {
+        if (!data || !data.columns) return;
+        if (psUnloadedNotice) psUnloadedNotice.style.display = 'none';
+        if (psFormContainer) psFormContainer.style.display = 'block';
+        if (psResultsPanel) psResultsPanel.style.display = 'none';
+        clearPsStatus();
+
+        if (psDatasetName) psDatasetName.textContent = data.filename + (data.is_benchmark ? ' [Benchmark]' : '');
+        if (psDatasetId) psDatasetId.textContent = data.dataset_id;
+        if (psDatasetRows) psDatasetRows.textContent = formatNumber(data.row_count);
+        if (psDatasetCols) psDatasetCols.textContent = formatNumber(data.column_count);
+
+        if (psTreatmentSelect) {
+            psTreatmentSelect.innerHTML = '<option value="">-- Choose treatment column --</option>';
+
+            let defaultTreatment = '';
+
+            data.columns.forEach(function (col) {
+                const optT = document.createElement('option');
+                optT.value = col.name;
+                optT.textContent = col.name + ' (' + col.inferred_type + ')';
+                psTreatmentSelect.appendChild(optT);
+
+                const nameLower = col.name.toLowerCase();
+                if (!defaultTreatment && (col.inferred_type === 'boolean' || nameLower === 'treatment' || nameLower === 'mens')) {
+                    defaultTreatment = col.name;
+                }
+            });
+
+            if (defaultTreatment) psTreatmentSelect.value = defaultTreatment;
+        }
+
+        // Populate confounder checkboxes
+        if (psConfoundersContainer) {
+            psConfoundersContainer.innerHTML = '';
+            data.columns.forEach(function (col) {
+                const label = document.createElement('label');
+                label.className = 'confounder-checkbox-item';
+                label.setAttribute('data-col', col.name);
+
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.name = 'ps-confounder';
+                checkbox.value = col.name;
+
+                // Check default confounders for Hillstrom if not treatment
+                const nameLower = col.name.toLowerCase();
+                if (data.is_benchmark && (nameLower === 'recency' || nameLower === 'history')) {
+                    checkbox.checked = true;
+                }
+
+                checkbox.addEventListener('change', function () {
+                    validatePsForm();
+                });
+
+                const spanName = document.createElement('span');
+                spanName.textContent = col.name;
+
+                const spanType = document.createElement('span');
+                spanType.className = 'col-type-tag';
+                spanType.textContent = col.inferred_type;
+
+                label.appendChild(checkbox);
+                label.appendChild(spanName);
+                label.appendChild(spanType);
+
+                psConfoundersContainer.appendChild(label);
+            });
+        }
+
+        updatePsConfoundersAvailability();
+        validatePsForm();
+    }
+
+    function updatePsConfoundersAvailability() {
+        if (!psConfoundersContainer) return;
+        const tCol = psTreatmentSelect ? psTreatmentSelect.value : '';
+
+        const items = psConfoundersContainer.querySelectorAll('.confounder-checkbox-item');
+        items.forEach(function (item) {
+            const col = item.getAttribute('data-col');
+            const checkbox = item.querySelector('input[type="checkbox"]');
+            if (!checkbox) return;
+
+            if (col && col === tCol) {
+                checkbox.checked = false;
+                checkbox.disabled = true;
+                item.classList.add('disabled');
+            } else {
+                checkbox.disabled = false;
+                item.classList.remove('disabled');
+            }
+        });
+    }
+
+    function getSelectedPsConfounders() {
+        if (!psConfoundersContainer) return [];
+        const checkboxes = psConfoundersContainer.querySelectorAll('input[name="ps-confounder"]:checked');
+        const selected = [];
+        checkboxes.forEach(function (cb) {
+            if (!cb.disabled && cb.value) {
+                selected.push(cb.value);
+            }
+        });
+        return selected;
+    }
+
+    function validatePsForm() {
+        if (!currentDataset) {
+            if (runPsBtn) runPsBtn.disabled = true;
+            return false;
+        }
+
+        const tCol = psTreatmentSelect ? psTreatmentSelect.value : '';
+        const selectedConfounders = getSelectedPsConfounders();
+
+        if (!tCol) {
+            clearPsStatus();
+            if (runPsBtn) runPsBtn.disabled = true;
+            return false;
+        }
+
+        if (selectedConfounders.length === 0) {
+            clearPsStatus();
+            if (runPsBtn) runPsBtn.disabled = true;
+            return false;
+        }
+
+        // Check role conflicts
+        for (let i = 0; i < selectedConfounders.length; i++) {
+            const cCol = selectedConfounders[i];
+            if (cCol === tCol) {
+                showPsStatus('Confounder "' + cCol + '" cannot also be the Treatment column.', 'error');
+                if (runPsBtn) runPsBtn.disabled = true;
+                return false;
+            }
+        }
+
+        // Validate thresholds
+        const zVal = psNearZeroInput ? parseFloat(psNearZeroInput.value) : 0.05;
+        const oVal = psNearOneInput ? parseFloat(psNearOneInput.value) : 0.95;
+        if (isNaN(zVal) || isNaN(oVal) || zVal < 0 || oVal > 1 || zVal >= oVal) {
+            showPsStatus('Near-zero threshold must be strictly less than near-one threshold (within [0, 1]).', 'error');
+            if (runPsBtn) runPsBtn.disabled = true;
+            return false;
+        }
+
+        clearPsStatus();
+        if (runPsBtn) runPsBtn.disabled = false;
+        return true;
+    }
+
+    if (psTreatmentSelect) {
+        psTreatmentSelect.addEventListener('change', function () {
+            updatePsConfoundersAvailability();
+            validatePsForm();
+        });
+    }
+
+    if (psNearZeroInput) psNearZeroInput.addEventListener('input', validatePsForm);
+    if (psNearOneInput) psNearOneInput.addEventListener('input', validatePsForm);
+
+    if (runPsBtn) {
+        runPsBtn.addEventListener('click', function (e) {
+            e.preventDefault();
+            if (!validatePsForm()) return;
+            if (!currentDataset) {
+                showPsStatus('No active dataset found. Please load or upload a dataset first.', 'error');
+                return;
+            }
+
+            const selectedConfounders = getSelectedPsConfounders();
+            const payload = {
+                treatment_col: psTreatmentSelect.value,
+                confounder_cols: selectedConfounders,
+                drop_missing: psDropMissingCheckbox ? psDropMissingCheckbox.checked : false,
+                near_zero_threshold: psNearZeroInput ? parseFloat(psNearZeroInput.value) || 0.05 : 0.05,
+                near_one_threshold: psNearOneInput ? parseFloat(psNearOneInput.value) || 0.95 : 0.95,
+            };
+
+            const treatedVal = psTreatedValInput ? psTreatedValInput.value.trim() : '';
+            if (treatedVal !== '') payload.treated_value = treatedVal;
+
+            const untreatedVal = psUntreatedValInput ? psUntreatedValInput.value.trim() : '';
+            if (untreatedVal !== '') payload.untreated_value = untreatedVal;
+
+            runPsBtn.disabled = true;
+            if (psResultsPanel) psResultsPanel.style.display = 'none';
+            showPsStatus('Estimating propensity scores via logistic regression (evaluating all records)... Please wait.', 'info');
+
+            fetch('/api/dataset/' + encodeURIComponent(currentDataset.dataset_id) + '/causal/propensity-scores', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                },
+                body: JSON.stringify(payload),
+            })
+                .then(function (res) {
+                    if (!res.ok) {
+                        return res.json().then(function (err) {
+                            throw new Error(err.detail || 'Analysis request failed with HTTP ' + res.status);
+                        });
+                    }
+                    return res.json();
+                })
+                .then(function (results) {
+                    renderPsResults(results);
+                    showPsStatus('Propensity score estimation complete: modeled ' + formatNumber(results.n_total) + ' observations from ' + results.dataset_filename + '.', 'success');
+                })
+                .catch(function (err) {
+                    showPsStatus('Propensity Score Estimation Error: ' + err.message, 'error');
+                })
+                .finally(function () {
+                    runPsBtn.disabled = false;
+                });
+        });
+    }
+
+    function renderPsResults(r) {
+        if (!r) return;
+        if (psResultsPanel) psResultsPanel.style.display = 'block';
+
+        if (resPsDatasetName) resPsDatasetName.textContent = r.dataset_filename || '—';
+        if (resPsTotalRows) resPsTotalRows.textContent = formatNumber(r.total_dataset_rows);
+        if (resPsEvalRows) resPsEvalRows.textContent = formatNumber(r.n_total);
+        if (resPsDroppedRows) resPsDroppedRows.textContent = formatNumber(r.rows_dropped);
+
+        const diag = r.overlap_diagnostics || {};
+
+        if (resPsOverlapStatus) {
+            if (diag.has_overlap) {
+                resPsOverlapStatus.textContent = (diag.scores_near_zero > 0 || diag.scores_near_one > 0) ? 'Limited Overlap' : 'Common Support';
+                resPsOverlapStatus.style.color = (diag.scores_near_zero > 0 || diag.scores_near_one > 0) ? '#D97706' : 'var(--deep-sage)';
+            } else {
+                resPsOverlapStatus.textContent = 'Violated (Disjoint)';
+                resPsOverlapStatus.style.color = '#DC2626';
+            }
+        }
+
+        if (resPsOverlapSub) {
+            resPsOverlapSub.textContent = diag.has_overlap ? 'Positivity condition satisfied' : 'No common support between groups';
+        }
+
+        if (resPsSupportRange) {
+            if (diag.common_support_range && Array.isArray(diag.common_support_range)) {
+                resPsSupportRange.textContent = '[' + Number(diag.common_support_range[0]).toFixed(4) + ', ' + Number(diag.common_support_range[1]).toFixed(4) + ']';
+            } else {
+                resPsSupportRange.textContent = 'None (Disjoint)';
+            }
+        }
+
+        if (resPsTreatedRange) {
+            if (diag.treated_range && Array.isArray(diag.treated_range)) {
+                resPsTreatedRange.textContent = '[' + Number(diag.treated_range[0]).toFixed(4) + ', ' + Number(diag.treated_range[1]).toFixed(4) + ']';
+            } else {
+                resPsTreatedRange.textContent = '—';
+            }
+        }
+        if (resPsTreatedCountSub) {
+            resPsTreatedCountSub.textContent = 'N₁ = ' + formatNumber(r.n_treated) + ' treated units';
+        }
+
+        if (resPsControlRange) {
+            if (diag.control_range && Array.isArray(diag.control_range)) {
+                resPsControlRange.textContent = '[' + Number(diag.control_range[0]).toFixed(4) + ', ' + Number(diag.control_range[1]).toFixed(4) + ']';
+            } else {
+                resPsControlRange.textContent = '—';
+            }
+        }
+        if (resPsControlCountSub) {
+            resPsControlCountSub.textContent = 'N₀ = ' + formatNumber(r.n_control) + ' control units';
+        }
+
+        if (resPsBoundaryCount) {
+            const nearZ = diag.scores_near_zero || 0;
+            const nearO = diag.scores_near_one || 0;
+            resPsBoundaryCount.textContent = formatNumber(nearZ + nearO);
+        }
+        if (resPsBoundarySub) {
+            const zThresh = diag.near_zero_threshold !== undefined ? diag.near_zero_threshold : 0.05;
+            const oThresh = diag.near_one_threshold !== undefined ? diag.near_one_threshold : 0.95;
+            resPsBoundarySub.textContent = (diag.scores_near_zero || 0) + ' (< ' + zThresh + '), ' + (diag.scores_near_one || 0) + ' (> ' + oThresh + ')';
+        }
+
+        const meta = r.model_metadata || {};
+        if (resPsPseudoR2) {
+            resPsPseudoR2.textContent = (meta.pseudo_r2 !== null && meta.pseudo_r2 !== undefined) ? Number(meta.pseudo_r2).toFixed(4) : 'N/A';
+        }
+        if (resPsConvergedSub) {
+            const conv = meta.converged ? 'Converged (' + (meta.n_iterations || 0) + ' iter)' : 'Did not converge';
+            resPsConvergedSub.textContent = conv;
+        }
+
+        // Render Pre-Adjustment Covariate Imbalance Table
+        if (psBalanceTbody) {
+            psBalanceTbody.innerHTML = '';
+            const balanceMap = r.covariate_balance || r.unadjusted_covariate_balance || {};
+            const keys = Object.keys(balanceMap);
+
+            if (keys.length === 0) {
+                const tr = document.createElement('tr');
+                const td = document.createElement('td');
+                td.colSpan = 6;
+                td.textContent = 'No covariate balance statistics available.';
+                td.style.textAlign = 'center';
+                tr.appendChild(td);
+                psBalanceTbody.appendChild(tr);
+            } else {
+                keys.forEach(function (colName) {
+                    const row = balanceMap[colName];
+                    const tr = document.createElement('tr');
+
+                    // 1. Name
+                    const tdName = document.createElement('td');
+                    tdName.style.fontWeight = '600';
+                    tdName.textContent = colName;
+                    tr.appendChild(tdName);
+
+                    // 2. Type
+                    const tdType = document.createElement('td');
+                    const spanType = document.createElement('span');
+                    spanType.className = 'col-type-tag';
+                    spanType.textContent = row.covariate_type || 'numeric';
+                    tdType.appendChild(spanType);
+                    tr.appendChild(tdType);
+
+                    // 3. Treated Mean
+                    const tdTMean = document.createElement('td');
+                    tdTMean.textContent = (row.mean_treated !== null && row.mean_treated !== undefined) ? Number(row.mean_treated).toFixed(2) : '—';
+                    tr.appendChild(tdTMean);
+
+                    // 4. Control Mean
+                    const tdCMean = document.createElement('td');
+                    tdCMean.textContent = (row.mean_control !== null && row.mean_control !== undefined) ? Number(row.mean_control).toFixed(2) : '—';
+                    tr.appendChild(tdCMean);
+
+                    // 5. SMD
+                    const tdSmd = document.createElement('td');
+                    if (row.smd !== null && row.smd !== undefined) {
+                        const smdVal = Number(row.smd);
+                        const prefix = smdVal > 0 ? '+' : '';
+                        tdSmd.textContent = prefix + smdVal.toFixed(3);
+                    } else {
+                        tdSmd.textContent = '—';
+                    }
+                    tr.appendChild(tdSmd);
+
+                    // 6. Balance Status Badge
+                    const tdStatus = document.createElement('td');
+                    const spanStatus = document.createElement('span');
+                    if (row.is_balanced === true) {
+                        spanStatus.className = 'type-badge type-boolean';
+                        spanStatus.textContent = 'Balanced (|SMD| ≤ 0.10)';
+                    } else if (row.is_balanced === false) {
+                        spanStatus.className = 'type-badge type-string';
+                        spanStatus.textContent = 'Imbalanced (|SMD| > 0.10)';
+                        spanStatus.style.backgroundColor = '#FEE2E2';
+                        spanStatus.style.color = '#B91C1C';
+                    } else {
+                        spanStatus.className = 'type-badge type-unknown';
+                        spanStatus.textContent = row.note || 'Categorical (unweighted)';
+                    }
+                    tdStatus.appendChild(spanStatus);
+                    tr.appendChild(tdStatus);
+
+                    psBalanceTbody.appendChild(tr);
+                });
+            }
+        }
+
+        if (resPsNumConf) {
+            resPsNumConf.textContent = (r.numeric_confounders && r.numeric_confounders.length) ? r.numeric_confounders.join(', ') : 'None';
+        }
+        if (resPsCatConf) {
+            resPsCatConf.textContent = (r.categorical_confounders && r.categorical_confounders.length) ? r.categorical_confounders.join(', ') : 'None';
+        }
+        if (resPsFeaturesList) {
+            resPsFeaturesList.textContent = (r.model_features && r.model_features.length) ? r.model_features.join(', ') : 'None';
+        }
+
+        if (resPsInterpretationText) {
+            resPsInterpretationText.textContent = r.interpretation || 'No interpretation provided.';
+        }
+        if (resPsAssumptionsText) {
+            resPsAssumptionsText.textContent = r.assumptions || 'No identification assumptions documented.';
         }
     }
 });
