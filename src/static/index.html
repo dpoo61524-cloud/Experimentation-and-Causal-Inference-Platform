@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Experimentation and Causal Inference Platform</title>
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body>
+    <!-- Application Header -->
+    <header class="app-header">
+        <div class="header-container">
+            <div class="brand-block">
+                <h1>Experimentation and Causal Inference Platform</h1>
+                <p>An academic experimentation and causal inference tool for treatment effect estimation</p>
+            </div>
+            <div class="header-actions">
+                <div id="health-badge" class="health-badge health-checking" role="status" aria-live="polite">
+                    <span class="health-dot"></span>
+                    <span id="health-text" class="health-text">API: Checking...</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Dashboard Workspace -->
+    <main class="dashboard-workspace">
+        <div class="workspace-heading">
+            <h2>Causal Analysis Dashboard</h2>
+            <p>Select an econometric or statistical method to evaluate average treatment effects under various observational and experimental assumptions.</p>
+        </div>
+
+        <!-- Stage Notice Banner -->
+        <div class="info-banner" role="region" aria-label="Development Notice">
+            <strong>Foundation Notice:</strong> This dashboard provides the core layout and API integration skeleton. Dataset upload, CSV schema inspection, and interactive model execution will be introduced in subsequent stages. All statistical algorithms are executed directly by the FastAPI backend engine.
+        </div>
+
+        <!-- Section: Available Causal Analysis Methods -->
+        <section class="section-card" aria-labelledby="methods-heading">
+            <div class="section-header">
+                <h3 id="methods-heading">Available Causal Analysis Methods</h3>
+                <p>Six estimators designed for experimental and observational causal inference with explicit identification assumptions.</p>
+            </div>
+
+            <div class="methods-grid">
+                <!-- Method 1: Unadjusted ATE -->
+                <article class="method-card">
+                    <div class="method-top">
+                        <span class="method-number">Method 1</span>
+                        <h4 class="method-title">Unadjusted ATE</h4>
+                        <p class="method-desc">Computes the raw difference in group means between treated and control units, accompanied by Welch's robust standard errors and confidence intervals.</p>
+                    </div>
+                    <div class="method-meta">
+                        <div><strong>Assumption:</strong> Randomized treatment assignment</div>
+                        <span class="method-endpoint">POST /api/causal/unadjusted-ate</span>
+                    </div>
+                </article>
+
+                <!-- Method 2: Regression-Adjusted ATE -->
+                <article class="method-card">
+                    <div class="method-top">
+                        <span class="method-number">Method 2</span>
+                        <h4 class="method-title">Regression-Adjusted ATE</h4>
+                        <p class="method-desc">Adjusts for observed confounders using G-computation (standardization) over an Ordinary Least Squares outcome response surface.</p>
+                    </div>
+                    <div class="method-meta">
+                        <div><strong>Assumption:</strong> Conditional unconfoundedness, correct outcome model</div>
+                        <span class="method-endpoint">POST /api/causal/regression-adjusted-ate</span>
+                    </div>
+                </article>
+
+                <!-- Method 3: Propensity Scores -->
+                <article class="method-card">
+                    <div class="method-top">
+                        <span class="method-number">Method 3</span>
+                        <h4 class="method-title">Propensity Scores</h4>
+                        <p class="method-desc">Estimates conditional probabilities of treatment assignment via logistic regression, producing overlap diagnostics and common support tests.</p>
+                    </div>
+                    <div class="method-meta">
+                        <div><strong>Assumption:</strong> Positivity (0 &lt; e(X) &lt; 1), no unmeasured confounders</div>
+                        <span class="method-endpoint">POST /api/causal/propensity-scores</span>
+                    </div>
+                </article>
+
+                <!-- Method 4: IPTW ATE -->
+                <article class="method-card">
+                    <div class="method-top">
+                        <span class="method-number">Method 4</span>
+                        <h4 class="method-title">IPTW ATE</h4>
+                        <p class="method-desc">Reweights observations by inverse propensity scores using the Hájek estimator. Reports Kish effective sample size and covariate balance (SMD).</p>
+                    </div>
+                    <div class="method-meta">
+                        <div><strong>Assumption:</strong> Strong exchangeability, positivity</div>
+                        <span class="method-endpoint">POST /api/causal/iptw-ate</span>
+                    </div>
+                </article>
+
+                <!-- Method 5: Difference-in-Differences -->
+                <article class="method-card">
+                    <div class="method-top">
+                        <span class="method-number">Method 5</span>
+                        <h4 class="method-title">Difference-in-Differences</h4>
+                        <p class="method-desc">Computes double-differenced treatment effects across two groups and two time periods, removing time-invariant unobserved confounding.</p>
+                    </div>
+                    <div class="method-meta">
+                        <div><strong>Assumption:</strong> Parallel counterfactual trends</div>
+                        <span class="method-endpoint">POST /api/causal/difference-in-differences</span>
+                    </div>
+                </article>
+
+                <!-- Method 6: Sensitivity Analysis -->
+                <article class="method-card">
+                    <div class="method-top">
+                        <span class="method-number">Method 6</span>
+                        <h4 class="method-title">Sensitivity Analysis</h4>
+                        <p class="method-desc">Quantifies the vulnerability of causal estimates to unmeasured confounding bias and tests weight stability under propensity score truncation.</p>
+                    </div>
+                    <div class="method-meta">
+                        <div><strong>Assumption:</strong> Bounded unmeasured confounding bias</div>
+                        <span class="method-endpoint">POST /api/causal/sensitivity-analysis</span>
+                    </div>
+                </article>
+            </div>
+        </section>
+
+        <!-- Section: Dataset Initial State (Empty State) -->
+        <section class="section-card" aria-labelledby="dataset-status-heading">
+            <div class="section-header">
+                <h3 id="dataset-status-heading">Dataset Status</h3>
+                <p>Data workspace and loaded observations.</p>
+            </div>
+            <div class="empty-state-box">
+                <p class="empty-state-title">No Dataset Loaded</p>
+                <p class="empty-state-desc">No active data table is currently loaded in memory. Dataset upload, CSV schema inspection, and benchmark dataset loading will be introduced in subsequent stages.</p>
+                <p class="empty-state-note">Status: Ready for Stage 7.3 Data Ingestion</p>
+            </div>
+        </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="dashboard-footer">
+        <p>Experimentation and Causal Inference Platform &bull; MCA Internship Project &bull; FastAPI Backend Service &bull; <a href="/docs">API Documentation (/docs)</a> &bull; <a href="/health">Health Endpoint (/health)</a></p>
+    </footer>
+
+    <!-- Real API Health Check Script -->
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const healthBadge = document.getElementById('health-badge');
+            const healthText = document.getElementById('health-text');
+
+            function updateHealthStatus(status, text) {
+                healthBadge.className = 'health-badge ' + status;
+                healthText.textContent = text;
+            }
+
+            // Perform real, unhardcoded health check against GET /health
+            fetch('/health', { method: 'GET', headers: { 'Accept': 'application/json' } })
+                .then(function (response) {
+                    if (!response.ok) {
+                        throw new Error('Server returned HTTP ' + response.status);
+                    }
+                    return response.json();
+                })
+                .then(function (data) {
+                    if (data && data.status === 'healthy') {
+                        updateHealthStatus('health-healthy', 'API: Healthy');
+                    } else {
+                        updateHealthStatus('health-unhealthy', 'API: Unhealthy');
+                    }
+                })
+                .catch(function (error) {
+                    updateHealthStatus('health-unhealthy', 'API: Offline');
+                });
+        });
+    </script>
+</body>
+</html>

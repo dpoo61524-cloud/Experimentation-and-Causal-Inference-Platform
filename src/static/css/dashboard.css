@@ -1,0 +1,345 @@
+/* ==========================================================================
+   Academic Experimentation and Causal Inference Platform - Dashboard CSS
+   Design System: Restrained academic theme, light-grey/white surfaces,
+   thin borders, system typography, single navy accent, zero gradients.
+   ========================================================================== */
+
+:root {
+    --bg-canvas: #f8fafc;
+    --bg-surface: #ffffff;
+    --bg-alt: #f1f5f9;
+    --border-color: #e2e8f0;
+    --border-dark: #cbd5e1;
+    --text-primary: #0f172a;
+    --text-secondary: #475569;
+    --text-muted: #64748b;
+    --accent-navy: #1e40af;
+    --accent-navy-hover: #1e3a8a;
+    --accent-subtle: #eff6ff;
+    --badge-bg: #e2e8f0;
+    
+    --health-healthy-text: #166534;
+    --health-healthy-bg: #f0fdf4;
+    --health-healthy-border: #bbf7d0;
+    --health-healthy-dot: #16a34a;
+
+    --health-unhealthy-text: #991b1b;
+    --health-unhealthy-bg: #fef2f2;
+    --health-unhealthy-border: #fecaca;
+    --health-unhealthy-dot: #dc2626;
+
+    --health-checking-text: #854d0e;
+    --health-checking-bg: #fefce8;
+    --health-checking-border: #fef08a;
+    --health-checking-dot: #ca8a04;
+
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    --radius-sm: 4px;
+    --radius-md: 6px;
+    --spacing-unit: 8px;
+}
+
+*, *::before, *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--text-primary);
+    background-color: var(--bg-canvas);
+    -webkit-font-smoothing: antialiased;
+}
+
+/* --- Application Header --- */
+.app-header {
+    background-color: var(--bg-surface);
+    border-bottom: 1px solid var(--border-color);
+    padding: 16px 24px;
+}
+
+.header-container {
+    max-width: 1200px;
+    margin: 0 auto;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+}
+
+.brand-block h1 {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: -0.01em;
+}
+
+.brand-block p {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-top: 2px;
+}
+
+/* --- API Health Status Badge --- */
+.health-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-color);
+    background-color: var(--bg-alt);
+    color: var(--text-secondary);
+    transition: none;
+}
+
+.health-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background-color: var(--text-muted);
+}
+
+.health-badge.health-healthy {
+    background-color: var(--health-healthy-bg);
+    border-color: var(--health-healthy-border);
+    color: var(--health-healthy-text);
+}
+
+.health-badge.health-healthy .health-dot {
+    background-color: var(--health-healthy-dot);
+}
+
+.health-badge.health-unhealthy {
+    background-color: var(--health-unhealthy-bg);
+    border-color: var(--health-unhealthy-border);
+    color: var(--health-unhealthy-text);
+}
+
+.health-badge.health-unhealthy .health-dot {
+    background-color: var(--health-unhealthy-dot);
+}
+
+.health-badge.health-checking {
+    background-color: var(--health-checking-bg);
+    border-color: var(--health-checking-border);
+    color: var(--health-checking-text);
+}
+
+.health-badge.health-checking .health-dot {
+    background-color: var(--health-checking-dot);
+}
+
+/* --- Main Workspace Layout --- */
+.dashboard-workspace {
+    max-width: 1200px;
+    margin: 24px auto;
+    padding: 0 24px;
+}
+
+.workspace-heading {
+    margin-bottom: 20px;
+}
+
+.workspace-heading h2 {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.workspace-heading p {
+    font-size: 14px;
+    color: var(--text-secondary);
+    margin-top: 4px;
+}
+
+/* --- Informational Notice Banner --- */
+.info-banner {
+    background-color: var(--accent-subtle);
+    border: 1px solid #bfdbfe;
+    border-left: 4px solid var(--accent-navy);
+    padding: 12px 16px;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    color: #1e3a8a;
+    margin-bottom: 24px;
+    line-height: 1.6;
+}
+
+.info-banner strong {
+    font-weight: 600;
+}
+
+/* --- Section Styling --- */
+.section-card {
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: 20px;
+    margin-bottom: 24px;
+}
+
+.section-header {
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 12px;
+    margin-bottom: 16px;
+}
+
+.section-header h3 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.section-header p {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-top: 2px;
+}
+
+/* --- Causal Methods Grid --- */
+.methods-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 16px;
+}
+
+.method-card {
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+}
+
+.method-card:hover {
+    border-color: var(--border-dark);
+}
+
+.method-top {
+    margin-bottom: 12px;
+}
+
+.method-number {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--accent-navy);
+    background-color: var(--accent-subtle);
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    display: inline-block;
+    margin-bottom: 8px;
+}
+
+.method-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 6px;
+}
+
+.method-desc {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin-bottom: 8px;
+}
+
+.method-meta {
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.4;
+    border-top: 1px solid var(--border-color);
+    padding-top: 8px;
+    margin-top: 8px;
+}
+
+.method-endpoint {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background-color: var(--bg-alt);
+    padding: 3px 6px;
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    display: inline-block;
+    margin-top: 6px;
+    word-break: break-all;
+}
+
+/* --- Dataset Initial State (Empty State) --- */
+.empty-state-box {
+    background-color: var(--bg-alt);
+    border: 1px dashed var(--border-dark);
+    border-radius: var(--radius-sm);
+    padding: 32px 20px;
+    text-align: center;
+}
+
+.empty-state-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 6px;
+}
+
+.empty-state-desc {
+    font-size: 13px;
+    color: var(--text-secondary);
+    max-width: 540px;
+    margin: 0 auto;
+    line-height: 1.5;
+}
+
+.empty-state-note {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 12px;
+}
+
+/* --- Dashboard Footer --- */
+.dashboard-footer {
+    border-top: 1px solid var(--border-color);
+    padding: 20px 24px;
+    margin-top: 40px;
+    text-align: center;
+    font-size: 12px;
+    color: var(--text-secondary);
+    background-color: var(--bg-surface);
+}
+
+.dashboard-footer a {
+    color: var(--accent-navy);
+    text-decoration: none;
+    font-weight: 500;
+}
+
+.dashboard-footer a:hover {
+    text-decoration: underline;
+}
+
+/* --- Responsive Adjustments --- */
+@media (max-width: 768px) {
+    .header-container {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .methods-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .dashboard-workspace {
+        padding: 0 16px;
+    }
+}

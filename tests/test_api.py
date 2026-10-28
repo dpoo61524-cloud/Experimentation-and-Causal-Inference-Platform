@@ -43,6 +43,58 @@ def test_docs_endpoint_available():
     assert "swagger" in response.text.lower() or "html" in response.text.lower()
 
 
+# --- Dashboard and Static File Endpoints ---
+
+def test_dashboard_endpoint_serves_html():
+    """Verify that GET /dashboard serves the HTML dashboard with title and 6 methods."""
+    response = client.get("/dashboard")
+    assert response.status_code == 200
+    assert "text/html" in response.headers.get("content-type", "").lower()
+
+    html = response.text
+    # Verify application title and academic subtitle
+    assert "Experimentation and Causal Inference Platform" in html
+    assert "academic experimentation and causal inference tool" in html
+
+    # Verify all six causal analysis method names
+    assert "Unadjusted ATE" in html
+    assert "Regression-Adjusted ATE" in html
+    assert "Propensity Scores" in html
+    assert "IPTW ATE" in html
+    assert "Difference-in-Differences" in html
+    assert "Sensitivity Analysis" in html
+
+    # Verify health status badge and causal endpoint references
+    assert "health-badge" in html
+    assert "/api/causal/unadjusted-ate" in html
+    assert "/api/causal/iptw-ate" in html
+
+
+def test_dashboard_static_css_asset():
+    """Verify that dashboard.css is served from /static/css/dashboard.css."""
+    response = client.get("/static/css/dashboard.css")
+    assert response.status_code == 200
+    assert "text/css" in response.headers.get("content-type", "").lower()
+    css = response.text
+    assert "--accent-navy" in css
+    assert "dashboard-workspace" in css
+
+
+def test_dashboard_preserves_root_and_health_json():
+    """Verify that GET / and GET /health remain intact alongside GET /dashboard."""
+    root_res = client.get("/")
+    assert root_res.status_code == 200
+    assert root_res.headers.get("content-type", "").startswith("application/json")
+    root_data = root_res.json()
+    assert "name" in root_data
+    assert "docs_url" in root_data
+    assert "Experimentation and Causal Inference Platform API" in root_data["name"]
+
+    health_res = client.get("/health")
+    assert health_res.status_code == 200
+    assert health_res.json() == {"status": "healthy"}
+
+
 # --- Experiment Compare Endpoint ---
 
 def test_valid_experiment_comparison():

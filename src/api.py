@@ -9,7 +9,8 @@ import sys
 from typing import Any, Dict, List, Literal, Optional, Sequence, Union
 
 from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 import uvicorn
 
@@ -17,6 +18,8 @@ import uvicorn
 SRC_DIR = Path(__file__).resolve().parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
+
+STATIC_DIR = SRC_DIR / "static"
 
 from statistics_engine import (
     compare_conversion_rates,
@@ -47,6 +50,9 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+# Mount static files directory for the frontend dashboard
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 @app.exception_handler(ValueError)
@@ -245,6 +251,23 @@ async def root() -> Dict[str, Any]:
 async def health_check() -> Dict[str, str]:
     """Return the health status of the API."""
     return {"status": "healthy"}
+
+
+@app.get(
+    "/dashboard",
+    response_class=FileResponse,
+    tags=["Dashboard"],
+    summary="Serve the causal inference web dashboard",
+)
+async def dashboard() -> FileResponse:
+    """Serve the academic experimentation and causal inference web dashboard."""
+    index_path = STATIC_DIR / "index.html"
+    if not index_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Dashboard frontend files not found.",
+        )
+    return FileResponse(str(index_path), media_type="text/html")
 
 
 @app.post(
