@@ -23,6 +23,8 @@ from causal_engine import (
     estimate_iptw_ate,
     validate_did_data,
     estimate_difference_in_differences,
+    analyze_unmeasured_confounding_sensitivity,
+    run_causal_sensitivity_analysis,
 )
 
 
@@ -2292,3 +2294,372 @@ def test_validate_did_data_standalone():
     assert val["pre_value"] == 0
     assert val["post_value"] == 1
     assert val["cell_counts"]["treatment_pre"] == 1
+
+
+# ============================================================================
+# 13. Causal Sensitivity Analysis and Robustness Checks Tests
+# ============================================================================
+
+def test_sensitivity_compare_unadjusted_and_regression_ate():
+    """Verify comparison of unadjusted and regression-adjusted ATE estimators."""
+    df = pd.DataFrame({
+        "t": [1, 1, 1, 0, 0, 0],
+        "x": [10.0, 20.0, 30.0, 5.0, 15.0, 25.0],
+        "y": [25.0, 35.0, 45.0, 15.0, 25.0, 35.0],
+    })
+
+    res = run_causal_sensitivity_analysis(
+        data=df,
+        treatment_col="t",
+        outcome_col="y",
+        confounder_cols=["x"],
+        reference_estimator="regression_adjusted",
+    )
+
+    assert res["reference_estimator"] == "regression_adjusted"
+    assert res["estimator_comparisons"]["unadjusted"]["available"] is True
+    assert res["estimator_comparisons"]["regression_adjusted"]["available"] is True
+    assert isinstance(res["estimator_comparisons"]["unadjusted"]["estimate"], float)
+    assert isinstance(res["estimator_comparisons"]["regression_adjusted"]["estimate"], float)
+
+
+def test_sensitivity_successful_iptw_comparison():
+    """Verify successful comparison across all 3 estimators when IPTW is estimable."""
+    df = pd.DataFrame({
+        "t": [1, 1, 1, 0, 0, 0],
+        "x": [2.0, 3.0, 4.0, 1.0, 2.0, 3.0],
+        "y": [20.0, 25.0, 30.0, 10.0, 15.0, 20.0],
+    })
+
+    res = run_causal_sensitivity_analysis(
+        data=df,
+        treatment_col="t",
+        outcome_col="y",
+        confounder_cols=["x"],
+        reference_estimator="iptw",
+    )
+
+    assert res["reference_estimator"] == "iptw"
+    assert res["estimator_comparisons"]["unadjusted"]["available"] is True
+    assert res["estimator_comparisons"]["regression_adjusted"]["available"] is True
+    assert res["estimator_comparisons"]["iptw"]["available"] is True
+    assert res["estimator_comparisons"]["iptw"]["ess_treated"] is not None
+    assert res["estimator_comparisons"]["iptw"]["ess_control"] is not None
+
+
+def test_sensitivity_reporting_when_estimator_unavailable():
+    """Verify that when no confounders are passed, regression and IPTW are marked unavailable with clear reasons."""
+    df = pd.DataFrame({
+        "t": [1, 1, 0, 0],
+        "y": [10.0, 15.0, 5.0, 8.0],
+    })
+
+    res = run_causal_sensitivity_analysis(
+        data=df,
+        treatment_col="t",
+        outcome_col="y",
+        confounder_cols=None,
+        reference_estimator="unadjusted",
+    )
+
+    assert res["reference_estimator"] == "unadjusted"
+    assert res["estimator_comparisons"]["unadjusted"]["available"] is True
+    assert res["estimator_comparisons"]["regression_adjusted"]["available"] is False
+    assert "Confounder columns not provided" in res["estimator_comparisons"]["regression_adjusted"]["reason"]
+    assert res["estimator_comparisons"]["iptw"]["available"] is False
+    assert "Confounder columns not provided" in res["estimator_comparisons"]["iptw"]["reason"]
+
+
+def test_sensitivity_error_reporting_not_silently_discarded():
+    """Verify that estimator errors (such as collinearity or singular matrix) record the exact error reason."""
+    # Data where confounder is constant -> validate_causal_data will fail for regression/IPTW
+    # We can test by setting up a scenario where confounder causes a failure
+    df = pd.DataFrame({
+        "t": [1, 1, 0, 0],
+        "x": [1.0, 1.0, 1.0, 1.0],  # Constant column
+        "y": [10.0, 15.0, 5.0, 8.0],
+    })
+
+    res = run_causal_sensitivity_analysis(
+        data=df,
+        treatment_col="t",
+        outcome_col="y",
+        confounder_cols=["x"],
+        reference_estimator="unadjusted",
+    )
+
+    assert res["estimator_comparisons"]["unadjusted"]["available"] is True
+    assert res["estimator_comparisons"]["regression_adjusted"]["available"] is False
+    assert "zero variance" in res["estimator_comparisons"]["regression_adjusted"]["reason"].lower()
+    assert res["estimator_comparisons"]["iptw"]["available"] is False
+    assert "zero variance" in res["estimator_comparisons"]["iptw"]["reason"].lower()
+
+
+def test_sensitivity_iptw_truncation_with_and_without_explicit_request():
+    """Verify that weights are not truncated by default, and only truncated when requested."""
+    df = pd.DataFrame({
+        "t": [1, 1, 1, 0, 0, 0],
+        "x": [5.0, 6.0, 7.0, 1.0, 2.0, 3.0],
+        "y": [50.0, 55.0, 60.0, 10.0, 15.0, 20.0],
+    })
+
+    # Without requesting truncation
+    res_default = run_causal_sensitivity_analysis(df, "t", "y", ["x"])
+    assert res_default["iptw_truncation_analysis"]["status"] == "not_requested"
+    assert len(res_default["iptw_truncation_analysis"]["scenarios"]) == 0
+
+    # With explicit truncation thresholds
+    res_trunc = run_causal_sensitivity_analysis(
+        df, "t", "y", ["x"], truncation_thresholds=[10.0, 3.0]
+    )
+    assert res_trunc["iptw_truncation_analysis"]["status"] == "evaluated"
+    assert len(res_trunc["iptw_truncation_analysis"]["scenarios"]) == 2
+
+
+def test_sensitivity_iptw_truncation_threshold_recording():
+    """Verify that truncation threshold, differences, and counts are correctly recorded."""
+    df = pd.DataFrame({
+        "t": [1, 1, 1, 0, 0, 0],
+        "x": [10.0, 12.0, 14.0, 2.0, 4.0, 6.0],
+        "y": [100.0, 110.0, 120.0, 20.0, 30.0, 40.0],
+    })
+
+    res = run_causal_sensitivity_analysis(
+        df, "t", "y", ["x"], truncation_thresholds=[5.0, 2.0]
+    )
+    scenarios = res["iptw_truncation_analysis"]["scenarios"]
+
+    assert scenarios[0]["threshold"] == 5.0
+    assert scenarios[1]["threshold"] == 2.0
+    assert "estimate" in scenarios[0]
+    assert "difference_from_untruncated" in scenarios[0]
+    assert "weights_truncated_count" in scenarios[0]
+    assert "identical_to_untruncated" in scenarios[0]
+
+
+def test_sensitivity_invalid_truncation_thresholds():
+    """Verify rejection of invalid truncation thresholds."""
+    df = pd.DataFrame({
+        "t": [1, 1, 0, 0],
+        "x": [2.0, 3.0, 1.0, 2.0],
+        "y": [10.0, 15.0, 5.0, 8.0],
+    })
+
+    with pytest.raises(ValueError, match="must be strictly positive"):
+        run_causal_sensitivity_analysis(df, "t", "y", ["x"], truncation_thresholds=[-1.0])
+
+    with pytest.raises(ValueError, match="must be strictly positive"):
+        run_causal_sensitivity_analysis(df, "t", "y", ["x"], truncation_thresholds=[0.0])
+
+    with pytest.raises(ValueError, match="cannot be NaN or infinite"):
+        run_causal_sensitivity_analysis(df, "t", "y", ["x"], truncation_thresholds=[float("inf")])
+
+    with pytest.raises(ValueError, match="cannot be empty"):
+        run_causal_sensitivity_analysis(df, "t", "y", ["x"], truncation_thresholds=[])
+
+
+def test_sensitivity_ess_and_diagnostics_retained():
+    """Verify effective sample sizes and weight diagnostics are retained in truncation scenarios."""
+    df = pd.DataFrame({
+        "t": [1, 1, 1, 0, 0, 0],
+        "x": [3.0, 4.0, 5.0, 1.0, 2.0, 3.0],
+        "y": [30.0, 35.0, 40.0, 10.0, 15.0, 20.0],
+    })
+
+    res = run_causal_sensitivity_analysis(df, "t", "y", ["x"], truncation_thresholds=[4.0])
+    scenarios = res["iptw_truncation_analysis"]["scenarios"]
+
+    assert scenarios[0]["ess_treated"] > 0
+    assert scenarios[0]["ess_control"] > 0
+    assert scenarios[0]["ess_total"] > 0
+    assert scenarios[0]["max_weight"] <= 4.0
+
+
+def test_sensitivity_positive_hypothetical_bias():
+    """Verify positive hypothetical bias adjustment: observed 5.0, bias 2.0 -> adjusted 3.0."""
+    res = analyze_unmeasured_confounding_sensitivity(
+        observed_estimate=5.0,
+        bias_values=2.0,
+    )
+
+    assert res["observed_estimate"] == pytest.approx(5.0)
+    assert len(res["bias_scenarios"]) == 1
+    assert res["bias_scenarios"][0]["hypothetical_bias"] == pytest.approx(2.0)
+    assert res["bias_scenarios"][0]["adjusted_estimate"] == pytest.approx(3.0)
+
+
+def test_sensitivity_negative_hypothetical_bias():
+    """Verify negative hypothetical bias adjustment: observed 5.0, bias -2.0 -> adjusted 7.0."""
+    res = analyze_unmeasured_confounding_sensitivity(
+        observed_estimate=5.0,
+        bias_values=-2.0,
+    )
+
+    assert res["bias_scenarios"][0]["adjusted_estimate"] == pytest.approx(7.0)
+
+
+def test_sensitivity_zero_hypothetical_bias():
+    """Verify zero hypothetical bias adjustment: observed 5.0, bias 0.0 -> adjusted 5.0."""
+    res = analyze_unmeasured_confounding_sensitivity(
+        observed_estimate=5.0,
+        bias_values=0.0,
+    )
+
+    assert res["bias_scenarios"][0]["adjusted_estimate"] == pytest.approx(5.0)
+
+
+def test_sensitivity_multiple_bias_scenarios():
+    """Verify multiple bias scenarios evaluated in a single call."""
+    res = analyze_unmeasured_confounding_sensitivity(
+        observed_estimate=10.0,
+        bias_values=[-5.0, 0.0, 2.5, 5.0, 10.0],
+    )
+
+    assert len(res["bias_scenarios"]) == 5
+    assert res["bias_scenarios"][0]["adjusted_estimate"] == pytest.approx(15.0)
+    assert res["bias_scenarios"][1]["adjusted_estimate"] == pytest.approx(10.0)
+    assert res["bias_scenarios"][2]["adjusted_estimate"] == pytest.approx(7.5)
+    assert res["bias_scenarios"][3]["adjusted_estimate"] == pytest.approx(5.0)
+    assert res["bias_scenarios"][4]["adjusted_estimate"] == pytest.approx(0.0)
+
+
+def test_sensitivity_confidence_interval_shifting():
+    """Verify that confidence interval bounds are shifted by the hypothetical bias."""
+    # Observed: 10.0, CI: [8.0, 12.0], Bias: 3.0 -> Adjusted CI: [5.0, 9.0]
+    res = analyze_unmeasured_confounding_sensitivity(
+        observed_estimate=10.0,
+        bias_values=[3.0],
+        confidence_interval=[8.0, 12.0],
+    )
+
+    adj_ci = res["bias_scenarios"][0]["adjusted_confidence_interval"]
+    assert adj_ci == pytest.approx([5.0, 9.0])
+    assert res["bias_scenarios"][0]["interval_includes_zero"] is False
+
+
+def test_sensitivity_interval_includes_zero_detection():
+    """Verify correct detection of whether an adjusted confidence interval spans zero."""
+    # CI [4.0, 8.0]
+    # Bias 2.0 -> [2.0, 6.0] -> includes_zero = False
+    # Bias 5.0 -> [-1.0, 3.0] -> includes_zero = True
+    # Bias 10.0 -> [-6.0, -2.0] -> includes_zero = False
+    res = analyze_unmeasured_confounding_sensitivity(
+        observed_estimate=6.0,
+        bias_values=[2.0, 5.0, 10.0],
+        confidence_interval=[4.0, 8.0],
+    )
+
+    assert res["bias_scenarios"][0]["interval_includes_zero"] is False
+    assert res["bias_scenarios"][1]["interval_includes_zero"] is True
+    assert res["bias_scenarios"][2]["interval_includes_zero"] is False
+
+
+def test_sensitivity_invalid_confidence_interval():
+    """Verify rejection of invalid confidence intervals."""
+    with pytest.raises(ValueError, match="lower bound .* cannot exceed upper bound"):
+        analyze_unmeasured_confounding_sensitivity(5.0, 1.0, confidence_interval=[10.0, 5.0])
+
+    with pytest.raises(ValueError, match="must contain exactly 2 elements"):
+        analyze_unmeasured_confounding_sensitivity(5.0, 1.0, confidence_interval=[1.0, 2.0, 3.0])
+
+    with pytest.raises(ValueError, match="cannot be NaN or infinite"):
+        analyze_unmeasured_confounding_sensitivity(5.0, 1.0, confidence_interval=[float("nan"), 5.0])
+
+
+def test_sensitivity_rejection_of_nan_and_infinite_inputs():
+    """Verify rejection of NaN and infinite observed estimates and biases."""
+    with pytest.raises(ValueError, match="observed_estimate cannot be NaN or infinite"):
+        analyze_unmeasured_confounding_sensitivity(float("nan"), 1.0)
+
+    with pytest.raises(ValueError, match="observed_estimate cannot be NaN or infinite"):
+        analyze_unmeasured_confounding_sensitivity(float("inf"), 1.0)
+
+    with pytest.raises(ValueError, match="cannot be NaN or infinite"):
+        analyze_unmeasured_confounding_sensitivity(5.0, float("nan"))
+
+    with pytest.raises(ValueError, match="cannot be NaN or infinite"):
+        analyze_unmeasured_confounding_sensitivity(5.0, [1.0, float("inf")])
+
+
+def test_sensitivity_invalid_observed_effect_estimates():
+    """Verify rejection of invalid observed effect estimate types."""
+    with pytest.raises(ValueError, match="observed_estimate cannot be None"):
+        analyze_unmeasured_confounding_sensitivity(None, 1.0)
+
+    with pytest.raises(ValueError, match="observed_estimate cannot be a boolean"):
+        analyze_unmeasured_confounding_sensitivity(True, 1.0)
+
+    with pytest.raises(ValueError, match="observed_estimate must be a numeric float or int"):
+        analyze_unmeasured_confounding_sensitivity("five", 1.0)
+
+
+def test_sensitivity_empty_bias_values_raises():
+    """Verify rejection of empty bias values sequence."""
+    with pytest.raises(ValueError, match="bias_values cannot be empty"):
+        analyze_unmeasured_confounding_sensitivity(5.0, [])
+
+
+def test_sensitivity_deterministic_output():
+    """Verify that sensitivity analysis returns identical deterministic results across repeated runs."""
+    df = pd.DataFrame({
+        "t": [1, 1, 1, 0, 0, 0],
+        "x": [3.0, 4.0, 5.0, 1.0, 2.0, 3.0],
+        "y": [30.0, 35.0, 40.0, 10.0, 15.0, 20.0],
+    })
+
+    res1 = run_causal_sensitivity_analysis(
+        df, "t", "y", ["x"], truncation_thresholds=[5.0], hypothetical_biases=[1.0, 2.0]
+    )
+    res2 = run_causal_sensitivity_analysis(
+        df, "t", "y", ["x"], truncation_thresholds=[5.0], hypothetical_biases=[1.0, 2.0]
+    )
+
+    assert res1["reference_estimate"] == pytest.approx(res2["reference_estimate"])
+    assert res1["estimator_comparisons"]["regression_adjusted"]["estimate"] == pytest.approx(
+        res2["estimator_comparisons"]["regression_adjusted"]["estimate"]
+    )
+    assert res1["iptw_truncation_analysis"]["scenarios"][0]["estimate"] == pytest.approx(
+        res2["iptw_truncation_analysis"]["scenarios"][0]["estimate"]
+    )
+    assert res1["unmeasured_confounding_analysis"]["bias_scenarios"][0]["adjusted_estimate"] == pytest.approx(
+        res2["unmeasured_confounding_analysis"]["bias_scenarios"][0]["adjusted_estimate"]
+    )
+
+
+def test_sensitivity_assumptions_and_limitations_content():
+    """Verify that educational assumptions and limitations disclaimers are present."""
+    df = pd.DataFrame({
+        "t": [1, 1, 0, 0],
+        "y": [10.0, 20.0, 5.0, 10.0],
+    })
+
+    res = run_causal_sensitivity_analysis(df, "t", "y")
+
+    assert "Multi-estimator consistency" in res["assumptions"]
+    assert "Weight truncation" in res["assumptions"]
+    assert "Unmeasured confounding" in res["assumptions"]
+    assert "does NOT prove" in res["assumptions"] or "NOT proof" in res["assumptions"]
+
+
+def test_sensitivity_fallback_when_reference_estimator_unavailable():
+    """Verify graceful fallback when requested reference estimator is unavailable."""
+    df = pd.DataFrame({
+        "t": [1, 1, 0, 0],
+        "y": [10.0, 20.0, 5.0, 10.0],
+    })
+
+    # Request regression_adjusted as reference, but provide no confounders
+    res = run_causal_sensitivity_analysis(
+        df, "t", "y", confounder_cols=None, reference_estimator="regression_adjusted"
+    )
+
+    assert res["reference_estimator"] == "unadjusted"
+    assert any("fell back to 'unadjusted'" in w for w in res["warnings"])
+
+
+def test_sensitivity_unsupported_reference_estimator_raises():
+    """Verify that unsupported reference estimator names raise ValueError."""
+    df = pd.DataFrame({"t": [1, 0], "y": [10.0, 20.0]})
+
+    with pytest.raises(ValueError, match="Unsupported reference_estimator"):
+        run_causal_sensitivity_analysis(df, "t", "y", reference_estimator="random_forest")

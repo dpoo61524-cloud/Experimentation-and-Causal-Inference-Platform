@@ -2376,6 +2376,10 @@ def estimate_iptw_ate(
         "is_truncated": truncate_weights,
         "truncation_max_weight": max_weight if truncate_weights else None,
         "rows_truncated": rows_truncated,
+        "weights_truncated_count": rows_truncated,
+        "max": float(np.max(weights)),
+        "min": float(np.min(weights)),
+        "mean": float(np.mean(weights)),
     }
 
     # 10. Warnings formulation
@@ -3054,6 +3058,602 @@ def estimate_difference_in_differences(
         "untreated_value": val_res["control_value"],
         "pre_value": val_res["pre_value"],
         "post_value": val_res["post_value"],
+        "interpretation": interpretation_text,
+        "assumptions": assumptions_text,
+    }
+
+
+# ============================================================================
+# Causal Sensitivity Analysis and Robustness Checks
+# ============================================================================
+
+def analyze_unmeasured_confounding_sensitivity(
+    observed_estimate: float,
+    bias_values: Union[float, Sequence[float]],
+    confidence_interval: Optional[Sequence[float]] = None,
+) -> Dict[str, Any]:
+    """Perform hypothetical bias-adjustment sensitivity analysis for unmeasured confounding.
+
+    Methodology:
+    ------------
+    This function implements a transparent, scenario-based bias adjustment model:
+
+        tau_adjusted(b) = tau_observed - b
+
+    where b represents an assumed signed bias induced by unmeasured confounding.
+    - Positive bias (b > 0): Assumes unmeasured confounding inflated the observed treatment
+      effect estimate upward (so adjusted estimate is smaller).
+    - Negative bias (b < 0): Assumes unmeasured confounding suppressed the observed treatment
+      effect estimate downward (so adjusted estimate is larger).
+    - Zero bias (b = 0): Unmeasured confounding has zero net impact (adjusted equals observed).
+
+    When a confidence interval [L, U] is provided, the interval bounds are shifted by b:
+        [L - b, U - b]
+    and the scenario reports whether the shifted interval spans zero.
+
+    Critical Assumptions & Limitations:
+    -----------------------------------
+    1. Hypothetical Scenarios: The bias values (b) are user-specified scenarios, NOT empirically
+       estimated quantities.
+    2. Additive Bias: Assumes a simple additive bias on the outcome contrast scale.
+    3. No P-Value Invention: This analysis shifts point estimates and interval bounds conditional
+       on hypothetical assumptions; it does not calculate or invent pseudo p-values.
+    4. Explanatory Scope: Sensitivity analysis demonstrates how conclusions would change under
+       specific assumptions about unmeasured confounding, but cannot prove that unmeasured
+       confounding is absent or bounded by the chosen values.
+
+    Parameters:
+    -----------
+    observed_estimate : float
+        Observed causal effect point estimate (must be a finite numeric float or int).
+    bias_values : float or Sequence[float]
+        One or more hypothetical signed bias values (b).
+    confidence_interval : Sequence[float], optional
+        Optional two-element confidence interval [lower, upper] for the observed estimate.
+
+    Returns:
+    --------
+    Dict[str, Any]
+        Structured dictionary containing:
+        - 'observed_estimate': float
+        - 'confidence_interval': [lower, upper] or None
+        - 'bias_scenarios': list of scenario dictionaries with adjusted estimates and intervals
+        - 'sign_convention': explanation of bias direction
+        - 'interpretation': narrative summary of scenario findings
+        - 'assumptions': educational explanation of assumptions and limitations
+
+    Raises:
+    -------
+    ValueError:
+        If observed_estimate, bias_values, or confidence_interval are non-numeric,
+        NaN, infinite, empty, or structurally invalid.
+    """
+    # 1. Validate observed_estimate
+    if observed_estimate is None:
+        raise ValueError("observed_estimate cannot be None.")
+    if isinstance(observed_estimate, bool):
+        raise ValueError("observed_estimate cannot be a boolean.")
+    if not isinstance(observed_estimate, (int, float)):
+        raise ValueError(
+            f"observed_estimate must be a numeric float or int, got {type(observed_estimate).__name__}."
+        )
+    if math.isnan(observed_estimate) or math.isinf(observed_estimate):
+        raise ValueError("observed_estimate cannot be NaN or infinite.")
+    obs_est = float(observed_estimate)
+
+    # 2. Validate bias_values
+    if bias_values is None:
+        raise ValueError("bias_values cannot be None.")
+    if isinstance(bias_values, (int, float)) and not isinstance(bias_values, bool):
+        if math.isnan(bias_values) or math.isinf(bias_values):
+            raise ValueError("bias_values cannot be NaN or infinite.")
+        biases = [float(bias_values)]
+    elif isinstance(bias_values, (list, tuple, np.ndarray, Sequence)):
+        if len(bias_values) == 0:
+            raise ValueError("bias_values cannot be empty.")
+        biases = []
+        for idx, b in enumerate(bias_values):
+            if b is None or isinstance(b, bool) or not isinstance(b, (int, float)):
+                raise ValueError(
+                    f"bias_values element at index {idx} ({b!r}) must be a numeric float or int."
+                )
+            if math.isnan(b) or math.isinf(b):
+                raise ValueError(f"bias_values element at index {idx} cannot be NaN or infinite.")
+            biases.append(float(b))
+    else:
+        raise ValueError(
+            f"bias_values must be a numeric float/int or sequence of numbers, got {type(bias_values).__name__}."
+        )
+
+    # 3. Validate confidence_interval
+    ci_validated: Optional[List[float]] = None
+    if confidence_interval is not None:
+        if not isinstance(confidence_interval, (list, tuple, np.ndarray, Sequence)):
+            raise ValueError(
+                f"confidence_interval must be a list or tuple of 2 numbers, got {type(confidence_interval).__name__}."
+            )
+        if len(confidence_interval) != 2:
+            raise ValueError(
+                f"confidence_interval must contain exactly 2 elements [lower, upper], got {len(confidence_interval)}."
+            )
+        lower, upper = confidence_interval[0], confidence_interval[1]
+        for val, name in [(lower, "lower"), (upper, "upper")]:
+            if val is None or isinstance(val, bool) or not isinstance(val, (int, float)):
+                raise ValueError(f"confidence_interval {name} bound ({val!r}) must be a numeric float or int.")
+            if math.isnan(val) or math.isinf(val):
+                raise ValueError(f"confidence_interval {name} bound cannot be NaN or infinite.")
+        l_val, u_val = float(lower), float(upper)
+        if l_val > u_val:
+            raise ValueError(f"confidence_interval lower bound ({l_val}) cannot exceed upper bound ({u_val}).")
+        ci_validated = [l_val, u_val]
+
+    # 4. Compute scenarios
+    scenarios = []
+    for b in biases:
+        adj_est = float(obs_est - b)
+        if ci_validated is not None:
+            adj_l = float(ci_validated[0] - b)
+            adj_u = float(ci_validated[1] - b)
+            adj_ci = [adj_l, adj_u]
+            inc_zero = bool(adj_l <= 0.0 <= adj_u)
+        else:
+            adj_ci = None
+            inc_zero = None
+
+        scenarios.append({
+            "hypothetical_bias": b,
+            "adjusted_estimate": adj_est,
+            "adjusted_confidence_interval": adj_ci,
+            "interval_includes_zero": inc_zero,
+        })
+
+    sign_convention_desc = (
+        "tau_adjusted(b) = tau_observed - b. "
+        "Positive bias (b > 0) assumes unmeasured confounding inflated the observed effect; "
+        "negative bias (b < 0) assumes unmeasured confounding suppressed the observed effect."
+    )
+
+    num_scenarios = len(scenarios)
+    if ci_validated is not None:
+        zero_crossings = [s["hypothetical_bias"] for s in scenarios if s["interval_includes_zero"]]
+        if zero_crossings:
+            ci_note = (
+                f"Under {len(zero_crossings)} of {num_scenarios} scenario(s) (bias={zero_crossings}), "
+                "the adjusted confidence interval spans zero, indicating that the null effect cannot be ruled out."
+            )
+        else:
+            ci_note = "Under none of the evaluated scenarios does the adjusted confidence interval span zero."
+    else:
+        ci_note = "No confidence interval was provided for interval coverage evaluation."
+
+    interpretation_text = (
+        f"Sensitivity analysis evaluated {num_scenarios} hypothetical unmeasured confounding scenario(s) "
+        f"for an observed estimate of {obs_est:.4f}. {ci_note} "
+        "Note: hypothetical biases represent user-specified assumptions rather than empirical estimates."
+    )
+
+    assumptions_text = (
+        "Hypothetical bias-adjustment sensitivity analysis explores whether qualitative conclusions "
+        "are robust to potential unmeasured confounding. Key assumptions and limitations: "
+        "(1) Scenario-based: the bias parameter (b) is an assumed hypothetical quantity, NOT an "
+        "empirically identified statistic; "
+        "(2) Additive structure: unmeasured confounding is assumed to act additively on the treatment effect scale; "
+        "(3) Informational role: sensitivity analysis illustrates how findings change under specific violations "
+        "of exchangeability, but cannot prove that unmeasured confounding is absent or bounded; "
+        "(4) Inference disclaimer: shifted intervals are conditional on the truth of the assumed bias; "
+        "no statistical p-values are calculated."
+    )
+
+    return {
+        "observed_estimate": obs_est,
+        "confidence_interval": ci_validated,
+        "bias_scenarios": scenarios,
+        "sign_convention": sign_convention_desc,
+        "interpretation": interpretation_text,
+        "assumptions": assumptions_text,
+    }
+
+
+def run_causal_sensitivity_analysis(
+    data: Any,
+    treatment_col: str,
+    outcome_col: str,
+    confounder_cols: Optional[Sequence[str]] = None,
+    treated_value: Optional[Any] = None,
+    control_value: Optional[Any] = None,
+    drop_missing: bool = False,
+    reference_estimator: str = "regression_adjusted",
+    truncation_thresholds: Optional[Sequence[float]] = None,
+    hypothetical_biases: Optional[Union[float, Sequence[float]]] = None,
+    untreated_value: Optional[Any] = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Perform causal sensitivity analysis across estimators, IPTW truncation, and unmeasured confounding.
+
+    This function conducts a unified robustness check covering three complementary dimensions:
+    1. Multi-Estimator Comparison (Part A):
+       Compares point estimates across available estimators: Unadjusted Difference in Means,
+       Regression-Adjusted ATE (G-computation), and IPTW ATE.
+    2. Weight Truncation Sensitivity (Part B):
+       Evaluates the stability and trade-offs of IPTW weights across caller-specified truncation
+       thresholds, reporting point estimates, effective sample sizes, and affected counts.
+    3. Unmeasured Confounding Sensitivity (Part C):
+       Applies a transparent hypothetical bias-adjustment model to the reference estimate under
+       user-supplied bias scenarios.
+
+    Parameters:
+    -----------
+    data : pd.DataFrame, Dict[str, Sequence], or List[Dict[str, Any]]
+        The tabular dataset to analyze.
+    treatment_col : str
+        Name of the binary treatment column.
+    outcome_col : str
+        Name of the numeric outcome column.
+    confounder_cols : Sequence[str], optional
+        Observed confounder column names. If omitted or empty, only unadjusted ATE is evaluated.
+    treated_value : Any, optional
+        Label identifying treated observations.
+    control_value : Any, optional
+        Label identifying control observations.
+    drop_missing : bool, default False
+        Explicit missing data policy (reused from validate_causal_data).
+    reference_estimator : str, default 'regression_adjusted'
+        Primary estimator used as the baseline reference point. One of:
+        'regression_adjusted', 'iptw', or 'unadjusted'.
+    truncation_thresholds : Sequence[float], optional
+        Optional sequence of positive finite thresholds (e.g. [10.0, 5.0, 3.0]) for IPTW weight
+        truncation robustness checks. Weights are never truncated unless explicitly requested.
+    hypothetical_biases : float or Sequence[float], optional
+        Optional hypothetical signed bias values for unmeasured confounding sensitivity analysis.
+    untreated_value : Any, optional
+        Alias for control_value.
+
+    Returns:
+    --------
+    Dict[str, Any]
+        Structured dictionary containing:
+        - 'reference_estimator': Name of the reference estimator used
+        - 'reference_estimate': Point estimate from the reference estimator
+        - 'observed_estimate': Alias for reference_estimate
+        - 'reference_confidence_interval': CI from reference estimator if available, else None
+        - 'estimator_comparisons': Dictionary of results for unadjusted, regression_adjusted, and iptw
+        - 'iptw_truncation_analysis': Results across requested truncation thresholds
+        - 'unmeasured_confounding_analysis': Sensitivity results from analyze_unmeasured_confounding_sensitivity
+        - 'treatment_col': str
+        - 'outcome_col': str
+        - 'confounder_cols': list of str
+        - 'warnings': list of warning messages
+        - 'interpretation': narrative summary of multi-estimator and sensitivity findings
+        - 'assumptions': educational explanation of causal identification and limitations
+    """
+    if control_value is None and untreated_value is not None:
+        control_value = untreated_value
+
+    valid_ref_estimators = {"regression_adjusted", "iptw", "unadjusted"}
+    ref_est_normalized = reference_estimator.lower().strip()
+    if ref_est_normalized not in valid_ref_estimators:
+        raise ValueError(
+            f"Unsupported reference_estimator: {reference_estimator!r}. "
+            f"Expected one of: {sorted(list(valid_ref_estimators))}."
+        )
+
+    warnings_list: List[str] = []
+
+    # 1. Unadjusted Difference in Means
+    unadj_info: Dict[str, Any] = {
+        "name": "Unadjusted Difference in Means",
+        "available": False,
+        "estimate": None,
+        "difference_from_reference": None,
+        "confidence_interval": None,
+        "reason": None,
+    }
+    unadj_res = None
+    try:
+        unadj_res = estimate_unadjusted_ate(
+            data=data,
+            treatment_col=treatment_col,
+            outcome_col=outcome_col,
+            treated_value=treated_value,
+            untreated_value=control_value,
+            drop_missing=drop_missing,
+            compute_ci=True,
+        )
+        unadj_info["available"] = True
+        unadj_info["estimate"] = float(unadj_res["ate"])
+        unadj_info["confidence_interval"] = unadj_res.get("confidence_interval")
+        unadj_info["n_total"] = unadj_res["n_total"]
+        unadj_info["mean_treated"] = unadj_res["mean_outcome_treated"]
+        unadj_info["mean_control"] = unadj_res["mean_outcome_control"]
+    except Exception as exc:
+        unadj_info["available"] = False
+        unadj_info["reason"] = str(exc)
+
+    # 2. Regression-Adjusted ATE
+    reg_info: Dict[str, Any] = {
+        "name": "Regression-Adjusted ATE (G-computation)",
+        "available": False,
+        "estimate": None,
+        "difference_from_reference": None,
+        "reason": None,
+    }
+    reg_res = None
+    has_confounders = (confounder_cols is not None) and (len(confounder_cols) > 0)
+    if not has_confounders:
+        reg_info["reason"] = "Confounder columns not provided. Regression adjustment requires at least one confounder."
+    else:
+        try:
+            reg_res = estimate_regression_adjusted_ate(
+                data=data,
+                treatment_col=treatment_col,
+                outcome_col=outcome_col,
+                confounder_cols=confounder_cols,
+                treated_value=treated_value,
+                untreated_value=control_value,
+                drop_missing=drop_missing,
+            )
+            reg_info["available"] = True
+            reg_info["estimate"] = float(reg_res["adjusted_ate"])
+            reg_info["model_type"] = reg_res.get("model_type")
+        except Exception as exc:
+            reg_info["available"] = False
+            reg_info["reason"] = str(exc)
+
+    # 3. IPTW ATE (untruncated)
+    iptw_info: Dict[str, Any] = {
+        "name": "Inverse Probability of Treatment Weighting (IPTW)",
+        "available": False,
+        "estimate": None,
+        "difference_from_reference": None,
+        "ess_treated": None,
+        "ess_control": None,
+        "ess_total": None,
+        "reason": None,
+    }
+    iptw_untrunc_res = None
+    if not has_confounders:
+        iptw_info["reason"] = "Confounder columns not provided. Propensity score modeling and IPTW require at least one confounder."
+    else:
+        try:
+            iptw_untrunc_res = estimate_iptw_ate(
+                data=data,
+                treatment_col=treatment_col,
+                outcome_col=outcome_col,
+                confounder_cols=confounder_cols,
+                treated_value=treated_value,
+                control_value=control_value,
+                drop_missing=drop_missing,
+                truncate_weights=False,
+            )
+            iptw_info["available"] = True
+            iptw_info["estimate"] = float(iptw_untrunc_res["iptw_ate"])
+            iptw_info["ess_treated"] = iptw_untrunc_res["ess_treated"]
+            iptw_info["ess_control"] = iptw_untrunc_res["ess_control"]
+            iptw_info["ess_total"] = iptw_untrunc_res["ess_total"]
+            iptw_info["weight_summary"] = iptw_untrunc_res["weight_summary"]
+        except Exception as exc:
+            iptw_info["available"] = False
+            iptw_info["reason"] = str(exc)
+
+    # 4. Determine Reference Estimator & Reference Estimate
+    ref_estimate: Optional[float] = None
+    ref_ci: Optional[List[float]] = None
+    chosen_ref = ref_est_normalized
+
+    if chosen_ref == "regression_adjusted":
+        if reg_info["available"]:
+            ref_estimate = reg_info["estimate"]
+        else:
+            if iptw_info["available"]:
+                chosen_ref = "iptw"
+                ref_estimate = iptw_info["estimate"]
+                warnings_list.append(
+                    f"Requested reference estimator 'regression_adjusted' was unavailable ({reg_info['reason']}); "
+                    "fell back to 'iptw'."
+                )
+            elif unadj_info["available"]:
+                chosen_ref = "unadjusted"
+                ref_estimate = unadj_info["estimate"]
+                ref_ci = unadj_info["confidence_interval"]
+                warnings_list.append(
+                    f"Requested reference estimator 'regression_adjusted' was unavailable ({reg_info['reason']}); "
+                    "fell back to 'unadjusted'."
+                )
+            else:
+                raise ValueError(
+                    f"All causal estimators failed. Unadjusted error: {unadj_info['reason']}; "
+                    f"Regression error: {reg_info['reason']}."
+                )
+    elif chosen_ref == "iptw":
+        if iptw_info["available"]:
+            ref_estimate = iptw_info["estimate"]
+        else:
+            if reg_info["available"]:
+                chosen_ref = "regression_adjusted"
+                ref_estimate = reg_info["estimate"]
+                warnings_list.append(
+                    f"Requested reference estimator 'iptw' was unavailable ({iptw_info['reason']}); "
+                    "fell back to 'regression_adjusted'."
+                )
+            elif unadj_info["available"]:
+                chosen_ref = "unadjusted"
+                ref_estimate = unadj_info["estimate"]
+                ref_ci = unadj_info["confidence_interval"]
+                warnings_list.append(
+                    f"Requested reference estimator 'iptw' was unavailable ({iptw_info['reason']}); "
+                    "fell back to 'unadjusted'."
+                )
+            else:
+                raise ValueError(
+                    f"All causal estimators failed. Unadjusted error: {unadj_info['reason']}; "
+                    f"IPTW error: {iptw_info['reason']}."
+                )
+    else:  # unadjusted
+        if unadj_info["available"]:
+            ref_estimate = unadj_info["estimate"]
+            ref_ci = unadj_info["confidence_interval"]
+        else:
+            raise ValueError(f"Unadjusted estimator failed: {unadj_info['reason']}.")
+
+    # Calculate differences from reference
+    for info in [unadj_info, reg_info, iptw_info]:
+        if info["available"] and ref_estimate is not None:
+            info["difference_from_reference"] = float(info["estimate"] - ref_estimate)
+
+    estimator_comparisons = {
+        "unadjusted": unadj_info,
+        "regression_adjusted": reg_info,
+        "iptw": iptw_info,
+    }
+
+    # 5. IPTW Weight Truncation Robustness (Part B)
+    truncation_analysis: Dict[str, Any] = {
+        "status": "not_requested",
+        "untruncated_estimate": iptw_info.get("estimate"),
+        "scenarios": [],
+        "note": "No truncation thresholds were requested. Weights were not truncated by default.",
+    }
+
+    if truncation_thresholds is not None:
+        if not isinstance(truncation_thresholds, (list, tuple, np.ndarray, Sequence)):
+            raise ValueError(
+                f"truncation_thresholds must be a sequence of positive numbers, got {type(truncation_thresholds).__name__}."
+            )
+        if len(truncation_thresholds) == 0:
+            raise ValueError("truncation_thresholds sequence cannot be empty when provided.")
+
+        validated_thresholds = []
+        for idx, thresh in enumerate(truncation_thresholds):
+            if thresh is None or isinstance(thresh, bool) or not isinstance(thresh, (int, float)):
+                raise ValueError(
+                    f"truncation_thresholds element at index {idx} ({thresh!r}) must be a numeric float or int."
+                )
+            if math.isnan(thresh) or math.isinf(thresh):
+                raise ValueError(f"truncation_thresholds element at index {idx} cannot be NaN or infinite.")
+            if float(thresh) <= 0.0:
+                raise ValueError(
+                    f"truncation_thresholds element at index {idx} must be strictly positive, got {thresh}."
+                )
+            validated_thresholds.append(float(thresh))
+
+        if not iptw_info["available"]:
+            truncation_analysis = {
+                "status": "unavailable",
+                "untruncated_estimate": None,
+                "scenarios": [],
+                "reason": f"IPTW estimator unavailable: {iptw_info['reason']}",
+                "note": "Cannot evaluate weight truncation when baseline IPTW estimation fails.",
+            }
+        else:
+            scenarios = []
+            untrunc_est = iptw_info["estimate"]
+            for thresh in validated_thresholds:
+                t_res = estimate_iptw_ate(
+                    data=data,
+                    treatment_col=treatment_col,
+                    outcome_col=outcome_col,
+                    confounder_cols=confounder_cols,
+                    treated_value=treated_value,
+                    control_value=control_value,
+                    drop_missing=drop_missing,
+                    truncate_weights=True,
+                    max_weight=thresh,
+                )
+                t_est = float(t_res["iptw_ate"])
+                diff = float(t_est - untrunc_est)
+                n_trunc = int(t_res["weight_summary"].get("rows_truncated", t_res["weight_summary"].get("weights_truncated_count", 0)))
+                max_w = float(t_res["weight_summary"].get("max_weight", t_res["weight_summary"].get("max", thresh)))
+                is_ident = bool(np.isclose(t_est, untrunc_est, atol=1e-12))
+
+                scenarios.append({
+                    "threshold": thresh,
+                    "estimate": t_est,
+                    "difference_from_untruncated": diff,
+                    "weights_truncated_count": n_trunc,
+                    "max_weight": max_w,
+                    "ess_treated": t_res["ess_treated"],
+                    "ess_control": t_res["ess_control"],
+                    "ess_total": t_res["ess_total"],
+                    "identical_to_untruncated": is_ident,
+                })
+
+            truncation_analysis = {
+                "status": "evaluated",
+                "untruncated_estimate": untrunc_est,
+                "scenarios": scenarios,
+                "note": (
+                    "Weight truncation caps extreme weights at a specified upper threshold, "
+                    "reducing sample variance at the potential cost of introducing finite-sample bias."
+                ),
+            }
+
+    # 6. Unmeasured Confounding Sensitivity Analysis (Part C)
+    unmeasured_analysis: Optional[Dict[str, Any]] = None
+    if hypothetical_biases is not None:
+        unmeasured_analysis = analyze_unmeasured_confounding_sensitivity(
+            observed_estimate=ref_estimate,
+            bias_values=hypothetical_biases,
+            confidence_interval=ref_ci,
+        )
+    else:
+        unmeasured_analysis = {
+            "status": "not_requested",
+            "note": "No hypothetical bias values provided. Pass hypothetical_biases to evaluate unmeasured confounding scenarios.",
+        }
+
+    # 7. Multi-Estimator Agreement Check & Warnings
+    available_estimates = [
+        info["estimate"] for info in estimator_comparisons.values() if info["available"]
+    ]
+    if len(available_estimates) > 1:
+        spread = float(max(available_estimates) - min(available_estimates))
+        warnings_list.append(
+            f"Estimator agreement check: {len(available_estimates)} estimators available. "
+            f"Point estimate spread: {spread:.4f}. Agreement between estimators reflects consistency "
+            "across specified models, but does NOT prove absence of unmeasured confounding or model validity."
+        )
+
+    # 8. Synthesis & Interpretation Text
+    available_summary = ", ".join(
+        f"{name}: {info['estimate']:.4f}"
+        for name, info in [
+            ("Unadjusted", unadj_info),
+            ("Regression-Adjusted", reg_info),
+            ("IPTW", iptw_info),
+        ]
+        if info["available"]
+    )
+    interpretation_text = (
+        f"Causal sensitivity analysis evaluated reference estimator '{chosen_ref}' with estimate {ref_estimate:.4f}. "
+        f"Available estimates ({available_summary}). "
+        f"Weight truncation status: {truncation_analysis['status']}. "
+        f"Unmeasured confounding status: {unmeasured_analysis.get('status', 'evaluated')}."
+    )
+
+    assumptions_text = (
+        "Causal sensitivity analysis explores robustness to analytical decisions and hypothetical unmeasured confounding. "
+        "Core principles: (1) Multi-estimator consistency: different estimators target the same ATE under different "
+        "functional forms (outcome modeling vs. propensity score weighting). Divergence indicates model misspecification "
+        "or overlap issues; agreement does NOT guarantee causal validity. "
+        "(2) Weight truncation: truncation trades variance reduction against bias; severe truncation alters the effective target estimand. "
+        "(3) Unmeasured confounding: sensitivity parameters are hypothetical assumptions that explore robustness bounds; "
+        "sensitivity analysis does NOT prove absence of unmeasured confounding or causal validity."
+    )
+
+    clean_confounders = list(confounder_cols) if confounder_cols is not None else []
+
+    return {
+        "reference_estimator": chosen_ref,
+        "reference_estimate": ref_estimate,
+        "observed_estimate": ref_estimate,
+        "reference_confidence_interval": ref_ci,
+        "estimator_comparisons": estimator_comparisons,
+        "iptw_truncation_analysis": truncation_analysis,
+        "unmeasured_confounding_analysis": unmeasured_analysis,
+        "treatment_col": treatment_col,
+        "outcome_col": outcome_col,
+        "confounder_cols": clean_confounders,
+        "warnings": warnings_list,
         "interpretation": interpretation_text,
         "assumptions": assumptions_text,
     }
