@@ -1,38 +1,56 @@
 /* ==========================================================================
-   Academic Experimentation and Causal Inference Platform - Dashboard CSS
-   Design System: Restrained academic theme, light-grey/white surfaces,
-   thin borders, system typography, single navy accent, zero gradients.
+   Experimentation and Causal Inference Platform - Dashboard CSS
+   Design System: Charcoal & Sage Green Academic Theme
+   Palette: Primary Charcoal (#29352E), Secondary Charcoal (#374139),
+            Sage Accent (#87977B), Deep Sage (#52634D), Soft Sage (#E3E8DE),
+            Warm Neutral (#F4F3ED), White (#FFFFFF), Primary Text (#252B27),
+            Secondary Text (#626A62), Borders (#D7DDD3).
    ========================================================================== */
 
 :root {
-    --bg-canvas: #f8fafc;
-    --bg-surface: #ffffff;
-    --bg-alt: #f1f5f9;
-    --border-color: #e2e8f0;
-    --border-dark: #cbd5e1;
-    --text-primary: #0f172a;
-    --text-secondary: #475569;
-    --text-muted: #64748b;
-    --accent-navy: #1e40af;
-    --accent-navy-hover: #1e3a8a;
-    --accent-subtle: #eff6ff;
-    --badge-bg: #e2e8f0;
-    
-    --health-healthy-text: #166534;
-    --health-healthy-bg: #f0fdf4;
-    --health-healthy-border: #bbf7d0;
-    --health-healthy-dot: #16a34a;
+    /* --- Base Color Palette --- */
+    --primary-charcoal: #29352E;
+    --secondary-charcoal: #374139;
+    --sage-accent: #87977B;
+    --deep-sage: #52634D;
+    --soft-sage-surface: #E3E8DE;
+    --warm-neutral-bg: #F4F3ED;
+    --white-surface: #FFFFFF;
+    --text-primary: #252B27;
+    --text-secondary: #626A62;
+    --text-muted: #7E867E;
+    --border-color: #D7DDD3;
+    --border-dark: #B8C2B3;
 
-    --health-unhealthy-text: #991b1b;
-    --health-unhealthy-bg: #fef2f2;
-    --health-unhealthy-border: #fecaca;
-    --health-unhealthy-dot: #dc2626;
+    /* --- Status Colors --- */
+    --color-success: #3F6B4F;
+    --color-warning: #8A652C;
+    --color-error: #A3443D;
 
-    --health-checking-text: #854d0e;
-    --health-checking-bg: #fefce8;
-    --health-checking-border: #fef08a;
-    --health-checking-dot: #ca8a04;
+    /* --- Semantic Surfaces & Aliases --- */
+    --bg-canvas: var(--warm-neutral-bg);
+    --bg-surface: var(--white-surface);
+    --bg-alt: var(--warm-neutral-bg);
+    --accent-sage: var(--deep-sage);
+    --accent-navy: var(--deep-sage); /* Preserved for backward test compatibility */
 
+    /* --- Health Badge Color Tokens --- */
+    --health-healthy-text: #2A5438;
+    --health-healthy-bg: #E3E8DE;
+    --health-healthy-border: #87977B;
+    --health-healthy-dot: #3F6B4F;
+
+    --health-unhealthy-text: #822722;
+    --health-unhealthy-bg: #FAECEB;
+    --health-unhealthy-border: #DFA9A5;
+    --health-unhealthy-dot: #A3443D;
+
+    --health-checking-text: #6B4E1E;
+    --health-checking-bg: #FBF4E7;
+    --health-checking-border: #DFCEB0;
+    --health-checking-dot: #8A652C;
+
+    /* --- Typography & Geometry --- */
     --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     --font-mono: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
     --radius-sm: 4px;
@@ -55,11 +73,12 @@ body {
     -webkit-font-smoothing: antialiased;
 }
 
-/* --- Application Header --- */
+/* --- Application Header (Charcoal Surface) --- */
 .app-header {
-    background-color: var(--bg-surface);
-    border-bottom: 1px solid var(--border-color);
+    background-color: var(--primary-charcoal);
+    border-bottom: 1px solid var(--secondary-charcoal);
     padding: 16px 24px;
+    color: #FFFFFF;
 }
 
 .header-container {
@@ -74,13 +93,13 @@ body {
 .brand-block h1 {
     font-size: 18px;
     font-weight: 700;
-    color: var(--text-primary);
+    color: #FFFFFF;
     letter-spacing: -0.01em;
 }
 
 .brand-block p {
     font-size: 13px;
-    color: var(--text-secondary);
+    color: var(--soft-sage-surface);
     margin-top: 2px;
 }
 
@@ -89,14 +108,14 @@ body {
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    padding: 5px 12px;
+    padding: 6px 12px;
     font-size: 12px;
     font-weight: 600;
     font-family: var(--font-mono);
     border-radius: var(--radius-sm);
-    border: 1px solid var(--border-color);
-    background-color: var(--bg-alt);
-    color: var(--text-secondary);
+    border: 1px solid var(--secondary-charcoal);
+    background-color: var(--secondary-charcoal);
+    color: var(--soft-sage-surface);
     transition: none;
 }
 
@@ -108,33 +127,33 @@ body {
 }
 
 .health-badge.health-healthy {
-    background-color: var(--health-healthy-bg);
-    border-color: var(--health-healthy-border);
-    color: var(--health-healthy-text);
+    background-color: #202C24;
+    border-color: var(--deep-sage);
+    color: #D3ECD7;
 }
 
 .health-badge.health-healthy .health-dot {
-    background-color: var(--health-healthy-dot);
+    background-color: #4CAF50;
 }
 
 .health-badge.health-unhealthy {
-    background-color: var(--health-unhealthy-bg);
-    border-color: var(--health-unhealthy-border);
-    color: var(--health-unhealthy-text);
+    background-color: #381E1C;
+    border-color: var(--color-error);
+    color: #FCDAD7;
 }
 
 .health-badge.health-unhealthy .health-dot {
-    background-color: var(--health-unhealthy-dot);
+    background-color: #E57373;
 }
 
 .health-badge.health-checking {
-    background-color: var(--health-checking-bg);
-    border-color: var(--health-checking-border);
-    color: var(--health-checking-text);
+    background-color: #352B1C;
+    border-color: var(--color-warning);
+    color: #F8E8C9;
 }
 
 .health-badge.health-checking .health-dot {
-    background-color: var(--health-checking-dot);
+    background-color: #F59E0B;
 }
 
 /* --- Main Workspace Layout --- */
@@ -160,24 +179,25 @@ body {
     margin-top: 4px;
 }
 
-/* --- Informational Notice Banner --- */
+/* --- Informational Notice Banner (Soft Sage Surface) --- */
 .info-banner {
-    background-color: var(--accent-subtle);
-    border: 1px solid #bfdbfe;
-    border-left: 4px solid var(--accent-navy);
+    background-color: var(--soft-sage-surface);
+    border: 1px solid var(--sage-accent);
+    border-left: 4px solid var(--deep-sage);
     padding: 12px 16px;
     border-radius: var(--radius-sm);
     font-size: 13px;
-    color: #1e3a8a;
+    color: var(--primary-charcoal);
     margin-bottom: 24px;
     line-height: 1.6;
 }
 
 .info-banner strong {
     font-weight: 600;
+    color: var(--deep-sage);
 }
 
-/* --- Section Styling --- */
+/* --- Section Styling (White Surface with Thin Sage Borders) --- */
 .section-card {
     background-color: var(--bg-surface);
     border: 1px solid var(--border-color);
@@ -204,103 +224,7 @@ body {
     margin-top: 2px;
 }
 
-/* --- Causal Methods Grid --- */
-.methods-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-    gap: 16px;
-}
-
-.method-card {
-    background-color: var(--bg-surface);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-sm);
-    padding: 16px;
-    display: flex;
-    flex-direction: column;
-    justify-content: space-between;
-}
-
-.method-card:hover {
-    border-color: var(--border-dark);
-}
-
-.method-top {
-    margin-bottom: 12px;
-}
-
-.method-number {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--accent-navy);
-    background-color: var(--accent-subtle);
-    padding: 2px 6px;
-    border-radius: var(--radius-sm);
-    display: inline-block;
-    margin-bottom: 8px;
-}
-
-.method-title {
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--text-primary);
-    margin-bottom: 6px;
-}
-
-.method-desc {
-    font-size: 13px;
-    color: var(--text-secondary);
-    line-height: 1.5;
-    margin-bottom: 8px;
-}
-
-.method-meta {
-    font-size: 12px;
-    color: var(--text-muted);
-    line-height: 1.4;
-    border-top: 1px solid var(--border-color);
-    padding-top: 8px;
-    margin-top: 8px;
-}
-
-.method-endpoint {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    background-color: var(--bg-alt);
-    padding: 3px 6px;
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    display: inline-block;
-    margin-top: 6px;
-    word-break: break-all;
-}
-
-/* --- Dataset Initial State (Empty State) --- */
-.empty-state-box {
-    background-color: var(--bg-alt);
-    border: 1px dashed var(--border-dark);
-    border-radius: var(--radius-sm);
-    padding: 32px 20px;
-    text-align: center;
-}
-
-.empty-state-title {
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--text-primary);
-    margin-bottom: 6px;
-}
-
-.empty-state-desc {
-    font-size: 13px;
-    color: var(--text-secondary);
-    max-width: 540px;
-    margin: 0 auto;
-    line-height: 1.5;
-}
-
-/* --- Dataset Ingestion Controls --- */
+/* --- Dataset Ingestion Controls Panel --- */
 .ingestion-panel {
     display: flex;
     flex-wrap: wrap;
@@ -314,7 +238,7 @@ body {
     border: 1px solid var(--border-color);
     border-radius: var(--radius-sm);
     padding: 16px;
-    background-color: var(--bg-alt);
+    background-color: var(--warm-neutral-bg);
 }
 
 .upload-box h4, .benchmark-box h4 {
@@ -355,10 +279,10 @@ body {
     border: 1px solid var(--border-color);
     border-radius: var(--radius-sm);
     padding: 16px;
-    background-color: var(--bg-surface);
+    background-color: var(--white-surface);
 }
 
-/* --- Buttons --- */
+/* --- Buttons (Sage & Charcoal Palette) --- */
 .btn {
     display: inline-flex;
     align-items: center;
@@ -376,35 +300,46 @@ body {
 }
 
 .btn-primary {
-    background-color: var(--accent-navy);
-    color: #ffffff;
-    border-color: var(--accent-navy);
+    background-color: var(--deep-sage);
+    color: #FFFFFF;
+    border-color: var(--deep-sage);
 }
 
 .btn-primary:hover:not(:disabled) {
-    background-color: var(--accent-navy-hover);
-    border-color: var(--accent-navy-hover);
+    background-color: var(--secondary-charcoal);
+    border-color: var(--secondary-charcoal);
+}
+
+.btn-primary:focus-visible {
+    outline: 2px solid var(--sage-accent);
+    outline-offset: 2px;
 }
 
 .btn-secondary {
-    background-color: var(--bg-surface);
+    background-color: var(--white-surface);
     color: var(--text-primary);
     border-color: var(--border-dark);
 }
 
 .btn-secondary:hover:not(:disabled) {
-    background-color: var(--bg-alt);
-    border-color: var(--text-muted);
+    background-color: var(--soft-sage-surface);
+    border-color: var(--deep-sage);
+}
+
+.btn-secondary:focus-visible {
+    outline: 2px solid var(--sage-accent);
+    outline-offset: 2px;
 }
 
 .btn:disabled {
-    background-color: var(--border-color);
+    background-color: var(--soft-sage-surface);
     color: var(--text-muted);
     border-color: var(--border-color);
     cursor: not-allowed;
+    opacity: 0.65;
 }
 
-/* --- Status & Alert Messages --- */
+/* --- Status & Alert Messages (Earthy Status Accents) --- */
 .status-indicator {
     display: none;
     padding: 10px 14px;
@@ -419,21 +354,21 @@ body {
 }
 
 .status-info {
-    background-color: var(--accent-subtle);
-    border: 1px solid #bfdbfe;
-    color: #1e3a8a;
+    background-color: var(--soft-sage-surface);
+    border: 1px solid var(--sage-accent);
+    color: var(--primary-charcoal);
 }
 
 .status-success {
-    background-color: #f0fdf4;
-    border: 1px solid #bbf7d0;
-    color: #166534;
+    background-color: #EBF3ED;
+    border: 1px solid var(--color-success);
+    color: var(--color-success);
 }
 
 .status-error {
-    background-color: #fef2f2;
-    border: 1px solid #fecaca;
-    color: #991b1b;
+    background-color: #FAECEB;
+    border: 1px solid var(--color-error);
+    color: var(--color-error);
 }
 
 /* --- Dataset Overview KPI Badges --- */
@@ -445,7 +380,7 @@ body {
 }
 
 .overview-kpi-card {
-    background-color: var(--bg-alt);
+    background-color: var(--warm-neutral-bg);
     border: 1px solid var(--border-color);
     border-radius: var(--radius-sm);
     padding: 12px 14px;
@@ -456,7 +391,7 @@ body {
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--text-muted);
+    color: var(--text-secondary);
     margin-bottom: 4px;
 }
 
@@ -464,12 +399,12 @@ body {
     font-family: var(--font-mono);
     font-size: 18px;
     font-weight: 700;
-    color: var(--text-primary);
+    color: var(--primary-charcoal);
 }
 
 .kpi-subtext {
     font-size: 11px;
-    color: var(--text-secondary);
+    color: var(--deep-sage);
     margin-top: 2px;
 }
 
@@ -480,6 +415,7 @@ body {
     border: 1px solid var(--border-color);
     border-radius: var(--radius-sm);
     margin-bottom: 16px;
+    background-color: var(--white-surface);
 }
 
 .data-table {
@@ -491,10 +427,10 @@ body {
 }
 
 .data-table th {
-    background-color: var(--bg-alt);
-    color: var(--text-primary);
+    background-color: var(--soft-sage-surface);
+    color: var(--primary-charcoal);
     font-weight: 600;
-    padding: 8px 12px;
+    padding: 9px 12px;
     border-bottom: 1px solid var(--border-color);
     border-right: 1px solid var(--border-color);
 }
@@ -507,7 +443,7 @@ body {
     padding: 8px 12px;
     border-bottom: 1px solid var(--border-color);
     border-right: 1px solid var(--border-color);
-    color: var(--text-secondary);
+    color: var(--text-primary);
     font-family: var(--font-mono);
 }
 
@@ -516,14 +452,14 @@ body {
 }
 
 .data-table tbody tr:nth-child(even) {
-    background-color: #fafbfc;
+    background-color: #FAF9F5;
 }
 
 .data-table tbody tr:hover {
-    background-color: #f1f5f9;
+    background-color: #EDECE6;
 }
 
-/* Type Pill Badges */
+/* --- Type Pill Badges (Earth-Tone Palette) --- */
 .type-badge {
     font-family: var(--font-mono);
     font-size: 10px;
@@ -534,33 +470,33 @@ body {
 }
 
 .type-boolean {
-    background-color: #e0f2fe;
-    color: #0369a1;
-    border: 1px solid #bae6fd;
+    background-color: #E3E8DE;
+    color: var(--color-success);
+    border: 1px solid var(--sage-accent);
 }
 
 .type-integer {
-    background-color: #f3e8ff;
-    color: #7e22ce;
-    border: 1px solid #e9d5ff;
+    background-color: #E3E8DE;
+    color: var(--primary-charcoal);
+    border: 1px solid var(--deep-sage);
 }
 
 .type-numeric {
-    background-color: #fef3c7;
-    color: #b45309;
-    border: 1px solid #fde68a;
+    background-color: var(--warm-neutral-bg);
+    color: var(--deep-sage);
+    border: 1px solid var(--sage-accent);
 }
 
 .type-categorical {
-    background-color: #e2e8f0;
-    color: #334155;
-    border: 1px solid #cbd5e1;
+    background-color: var(--warm-neutral-bg);
+    color: var(--secondary-charcoal);
+    border: 1px solid var(--border-color);
 }
 
 .type-unknown {
-    background-color: #fee2e2;
-    color: #b91c1c;
-    border: 1px solid #fecaca;
+    background-color: #FAECEB;
+    color: var(--color-error);
+    border: 1px solid var(--color-error);
 }
 
 .table-footnote {
@@ -570,24 +506,134 @@ body {
     margin-top: 4px;
 }
 
-/* --- Dashboard Footer --- */
-.dashboard-footer {
+/* --- Causal Methods Grid --- */
+.methods-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 16px;
+}
+
+.method-card {
+    background-color: var(--white-surface);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+}
+
+.method-card:hover {
+    border-color: var(--sage-accent);
+}
+
+.method-top {
+    margin-bottom: 12px;
+}
+
+.method-number {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--deep-sage);
+    background-color: var(--soft-sage-surface);
+    border: 1px solid var(--border-color);
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    display: inline-block;
+    margin-bottom: 8px;
+}
+
+.method-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 6px;
+}
+
+.method-desc {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin-bottom: 8px;
+}
+
+.method-meta {
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.4;
     border-top: 1px solid var(--border-color);
+    padding-top: 8px;
+    margin-top: 8px;
+}
+
+.method-meta strong {
+    color: var(--text-primary);
+}
+
+.method-endpoint {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background-color: var(--warm-neutral-bg);
+    border: 1px solid var(--border-color);
+    padding: 3px 6px;
+    border-radius: var(--radius-sm);
+    color: var(--primary-charcoal);
+    display: inline-block;
+    margin-top: 6px;
+    word-break: break-all;
+}
+
+/* --- Dataset Initial State (Empty State) --- */
+.empty-state-box {
+    background-color: var(--warm-neutral-bg);
+    border: 1px dashed var(--border-dark);
+    border-radius: var(--radius-sm);
+    padding: 32px 20px;
+    text-align: center;
+}
+
+.empty-state-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 6px;
+}
+
+.empty-state-desc {
+    font-size: 13px;
+    color: var(--text-secondary);
+    max-width: 540px;
+    margin: 0 auto;
+    line-height: 1.5;
+}
+
+.empty-state-note {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--deep-sage);
+    margin-top: 12px;
+}
+
+/* --- Dashboard Footer (Charcoal Surface) --- */
+.dashboard-footer {
+    border-top: 1px solid var(--secondary-charcoal);
     padding: 20px 24px;
     margin-top: 40px;
     text-align: center;
     font-size: 12px;
-    color: var(--text-secondary);
-    background-color: var(--bg-surface);
+    color: var(--soft-sage-surface);
+    background-color: var(--primary-charcoal);
 }
 
 .dashboard-footer a {
-    color: var(--accent-navy);
+    color: var(--sage-accent);
     text-decoration: none;
     font-weight: 500;
 }
 
 .dashboard-footer a:hover {
+    color: #FFFFFF;
     text-decoration: underline;
 }
 
@@ -604,5 +650,14 @@ body {
 
     .dashboard-workspace {
         padding: 0 16px;
+    }
+
+    .ingestion-panel {
+        flex-direction: column;
+    }
+
+    .upload-box, .benchmark-box {
+        width: 100%;
+        flex: 1 1 100%;
     }
 }
