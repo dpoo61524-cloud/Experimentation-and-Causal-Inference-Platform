@@ -1478,4 +1478,396 @@ def test_causal_unadjusted_and_regression_adjusted_coexist(example_causal_payloa
     assert res_reg.json()["estimator"] == "regression_adjusted_ate"
 
 
+# --- Propensity Score Fixtures & Tests ---
+
+@pytest.fixture
+def example_propensity_payload():
+    """Deterministic payload with continuous numeric confounders."""
+    data = [
+        {"treatment": 1, "age": 25, "income": 45000.0},
+        {"treatment": 1, "age": 30, "income": 52000.0},
+        {"treatment": 1, "age": 35, "income": 48000.0},
+        {"treatment": 1, "age": 40, "income": 60000.0},
+        {"treatment": 0, "age": 24, "income": 42000.0},
+        {"treatment": 0, "age": 29, "income": 50000.0},
+        {"treatment": 0, "age": 36, "income": 46000.0},
+        {"treatment": 0, "age": 42, "income": 58000.0},
+    ]
+    return {
+        "data": data,
+        "treatment_col": "treatment",
+        "confounder_cols": ["age", "income"],
+        "treated_value": 1,
+        "untreated_value": 0,
+        "drop_missing": False,
+        "near_zero_threshold": 0.05,
+        "near_one_threshold": 0.95,
+    }
+
+
+def test_propensity_scores_success(example_propensity_payload):
+    """Verify HTTP 200, schema structure, observation alignment, scores in [0, 1], and diagnostics."""
+    response = client.post("/api/causal/propensity-scores", json=example_propensity_payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    # Core metadata
+    assert data["estimator"] == "logistic_propensity_score"
+    assert data["n_total"] == 8
+    assert data["n_treated"] == 4
+    assert data["n_control"] == 4
+    assert data["treatment_col"] == "treatment"
+    assert data["confounder_cols"] == ["age", "income"]
+    assert data["numeric_confounders"] == ["age", "income"]
+    assert data["categorical_confounders"] == []
+    assert data["rows_dropped"] == 0
+
+    # Propensity score properties
+    scores = data["propensity_scores"]
+    assert len(scores) == 8
+    assert data["scores"] == scores
+    assert all(isinstance(s, float) for s in scores)
+    assert all(0.0 <= s <= 1.0 for s in scores)
+
+    # Observation index alignment
+    indices = data["observation_indices"]
+    assert len(indices) == 8
+    assert indices == [0, 1, 2, 3, 4, 5, 6, 7]
+    scores_by_idx = data["scores_by_index"]
+    for i in range(8):
+        assert str(i) in scores_by_idx
+        assert scores_by_idx[str(i)] == pytest.approx(scores[i])
+
+    # Model and feature metadata
+    assert "const" in data["model_features"]
+    assert "age" in data["model_features"]
+    assert "income" in data["model_features"]
+    assert isinstance(data["model_coefficients"], dict)
+    assert data["model_metadata"]["converged"] is True
+
+    # Overlap and covariate balance diagnostics
+    overlap = data["overlap_diagnostics"]
+    assert "min_score" in overlap
+    assert "max_score" in overlap
+    assert overlap["min_score"] <= overlap["max_score"]
+    assert "has_overlap" in overlap
+    assert overlap["near_zero_threshold"] == 0.05
+    assert overlap["near_one_threshold"] == 0.95
+
+    balance = data["unadjusted_covariate_balance"]
+    assert "age" in balance
+    assert "income" in balance
+    assert balance["age"]["covariate_type"] == "numeric"
+    assert "smd" in balance["age"]
+
+    # Educational notes & interpretation
+    assert "interpretation" in data
+    assert "assumptions" in data
+    assert "Positivity" in data["assumptions"]
+
+
+def test_propensity_scores_categorical_confounders():
+    """Verify that categorical confounders are one-hot encoded and properly handled."""
+    records = [
+        {"grp": 1, "age": 25, "region": "North"},
+        {"grp": 1, "age": 35, "region": "South"},
+        {"grp": 1, "age": 45, "region": "East"},
+        {"grp": 1, "age": 30, "region": "North"},
+        {"grp": 0, "age": 20, "region": "South"},
+        {"grp": 0, "age": 22, "region": "East"},
+        {"grp": 0, "age": 28, "region": "North"},
+        {"grp": 0, "age": 24, "region": "South"},
+    ]
+    payload = {
+        "data": records,
+        "treatment_col": "grp",
+        "confounder_cols": ["age", "region"],
+    }
+    response = client.post("/api/causal/propensity-scores", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["numeric_confounders"] == ["age"]
+    assert data["categorical_confounders"] == ["region"]
+    assert any("region_" in f for f in data["model_features"])
+    assert len(data["propensity_scores"]) == 8
+
+
+def test_propensity_scores_custom_treatment_labels():
+    """Verify explicit custom string treatment and control labels."""
+    records = [
+        {"arm": "Treated", "covar": 10.0},
+        {"arm": "Treated", "covar": 15.0},
+        {"arm": "Treated", "covar": 20.0},
+        {"arm": "Control", "covar": 5.0},
+        {"arm": "Control", "covar": 8.0},
+        {"arm": "Control", "covar": 12.0},
+    ]
+    payload = {
+        "data": records,
+        "treatment_col": "arm",
+        "confounder_cols": ["covar"],
+        "treated_value": "Treated",
+        "control_value": "Control",
+    }
+    response = client.post("/api/causal/propensity-scores", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["treated_value"] == "Treated"
+    assert data["control_value"] == "Control"
+    assert data["n_treated"] == 3
+    assert data["n_control"] == 3
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ["data", "treatment_col", "confounder_cols"],
+)
+def test_propensity_scores_missing_required_fields(example_propensity_payload, missing_field):
+    """Verify that omitting required request fields produces HTTP 422."""
+    payload = {k: v for k, v in example_propensity_payload.items() if k != missing_field}
+    response = client.post("/api/causal/propensity-scores", json=payload)
+    assert response.status_code == 422
+    assert "detail" in response.json()
+    assert "traceback" not in response.text.lower()
+
+
+@pytest.mark.parametrize(
+    "bad_data",
+    [[], "not_a_list", {"a": 1}, [1, 2, 3]],
+)
+def test_propensity_scores_empty_or_malformed_datasets(bad_data):
+    """Verify that empty or malformed dataset payloads produce HTTP 422."""
+    payload = {
+        "data": bad_data,
+        "treatment_col": "treatment",
+        "confounder_cols": ["age"],
+    }
+    response = client.post("/api/causal/propensity-scores", json=payload)
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "bad_confounders",
+    [[], [""], ["   "], "not_a_list", [123]],
+)
+def test_propensity_scores_invalid_confounder_list(example_propensity_payload, bad_confounders):
+    """Verify that empty or invalid confounder lists produce HTTP 422."""
+    payload = {**example_propensity_payload, "confounder_cols": bad_confounders}
+    response = client.post("/api/causal/propensity-scores", json=payload)
+    assert response.status_code == 422
+
+
+def test_propensity_scores_duplicate_confounder_names(example_propensity_payload):
+    """Verify that duplicate confounder names in the request produce HTTP 422."""
+    payload = {**example_propensity_payload, "confounder_cols": ["age", "age"]}
+    response = client.post("/api/causal/propensity-scores", json=payload)
+    assert response.status_code == 422
+    assert "duplicate" in str(response.json()["detail"]).lower()
+
+
+def test_propensity_scores_treatment_col_in_confounders(example_propensity_payload):
+    """Verify that specifying the treatment column as a confounder produces HTTP 422."""
+    payload = {**example_propensity_payload, "confounder_cols": ["age", "treatment"]}
+    response = client.post("/api/causal/propensity-scores", json=payload)
+    assert response.status_code == 422
+    assert "cannot also be the treatment column" in str(response.json()["detail"]).lower()
+
+
+def test_propensity_scores_missing_columns_in_data(example_propensity_payload):
+    """Verify rejection when treatment or confounder columns are absent from the dataset."""
+    # Missing treatment column
+    p1 = {**example_propensity_payload, "treatment_col": "nonexistent_treatment"}
+    r1 = client.post("/api/causal/propensity-scores", json=p1)
+    assert r1.status_code == 422
+    assert "nonexistent_treatment" in str(r1.json()["detail"])
+
+    # Missing confounder column
+    p2 = {**example_propensity_payload, "confounder_cols": ["age", "nonexistent_confounder"]}
+    r2 = client.post("/api/causal/propensity-scores", json=p2)
+    assert r2.status_code == 422
+    assert "nonexistent_confounder" in str(r2.json()["detail"])
+
+
+def test_propensity_scores_invalid_treatment_values():
+    """Verify rejection when the treatment column has non-binary labels."""
+    records = [
+        {"treatment": 0, "age": 20},
+        {"treatment": 1, "age": 25},
+        {"treatment": 2, "age": 30},
+    ]
+    payload = {
+        "data": records,
+        "treatment_col": "treatment",
+        "confounder_cols": ["age"],
+    }
+    response = client.post("/api/causal/propensity-scores", json=payload)
+    assert response.status_code == 422
+    assert "must be binary" in str(response.json()["detail"]).lower()
+
+
+@pytest.mark.parametrize(
+    "near_zero,near_one",
+    [
+        (0.5, 0.5),      # equal
+        (0.8, 0.2),      # reversed
+        (-0.1, 0.9),     # negative
+        (0.1, 1.5),      # > 1
+        (True, 0.9),     # boolean
+        (0.1, "high"),   # non-numeric
+    ],
+)
+def test_propensity_scores_invalid_thresholds(example_propensity_payload, near_zero, near_one):
+    """Verify that equal, reversed, out-of-range, or non-finite thresholds produce HTTP 422."""
+    payload = {
+        **example_propensity_payload,
+        "near_zero_threshold": near_zero,
+        "near_one_threshold": near_one,
+    }
+    response = client.post("/api/causal/propensity-scores", json=payload)
+    assert response.status_code == 422
+
+
+def test_propensity_scores_missing_values_rejected_by_default(example_propensity_payload):
+    """Verify rejection when missing values are present with drop_missing=False."""
+    bad_data = [dict(row) for row in example_propensity_payload["data"]]
+    bad_data[0]["income"] = None
+    payload = {**example_propensity_payload, "data": bad_data, "drop_missing": False}
+    response = client.post("/api/causal/propensity-scores", json=payload)
+    assert response.status_code == 422
+    assert "missing" in str(response.json()["detail"]).lower()
+
+
+def test_propensity_scores_explicit_drop_missing(example_propensity_payload):
+    """Verify that drop_missing=True drops rows and returns updated sample counts."""
+    dirty_data = [dict(row) for row in example_propensity_payload["data"]]
+    dirty_data.append({"treatment": 1, "age": None, "income": 50000.0})
+    dirty_data.append({"treatment": None, "age": 30, "income": 40000.0})
+
+    payload = {**example_propensity_payload, "data": dirty_data, "drop_missing": True}
+    response = client.post("/api/causal/propensity-scores", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["rows_dropped"] == 2
+    assert data["n_total"] == 8
+    assert len(data["propensity_scores"]) == 8
+
+
+def test_propensity_scores_all_rows_missing_after_drop():
+    """Verify rejection with HTTP 422 when no usable observations remain after drop_missing=True."""
+    dirty_data = [
+        {"treatment": None, "age": 25},
+        {"treatment": 1, "age": None},
+    ]
+    payload = {
+        "data": dirty_data,
+        "treatment_col": "treatment",
+        "confounder_cols": ["age"],
+        "drop_missing": True,
+    }
+    response = client.post("/api/causal/propensity-scores", json=payload)
+    assert response.status_code == 422
+
+
+def test_propensity_scores_single_treatment_class():
+    """Verify rejection when the dataset contains only one treatment class."""
+    data = [
+        {"treatment": 1, "age": 20},
+        {"treatment": 1, "age": 25},
+        {"treatment": 1, "age": 30},
+    ]
+    payload = {
+        "data": data,
+        "treatment_col": "treatment",
+        "confounder_cols": ["age"],
+    }
+    response = client.post("/api/causal/propensity-scores", json=payload)
+    assert response.status_code == 422
+
+
+def test_propensity_scores_constant_confounder():
+    """Verify rejection when a confounder has zero variance (constant)."""
+    data = [
+        {"treatment": 1, "const_age": 25},
+        {"treatment": 1, "const_age": 25},
+        {"treatment": 0, "const_age": 25},
+        {"treatment": 0, "const_age": 25},
+    ]
+    payload = {
+        "data": data,
+        "treatment_col": "treatment",
+        "confounder_cols": ["const_age"],
+    }
+    response = client.post("/api/causal/propensity-scores", json=payload)
+    assert response.status_code == 422
+    assert "zero variance" in str(response.json()["detail"]).lower()
+
+
+def test_propensity_scores_insufficient_observations():
+    """Verify rejection when observations are fewer than model parameters."""
+    data = [
+        {"treatment": 1, "x1": 1.0, "x2": 2.0},
+        {"treatment": 0, "x1": 3.0, "x2": 4.0},
+    ]
+    payload = {
+        "data": data,
+        "treatment_col": "treatment",
+        "confounder_cols": ["x1", "x2"],
+    }
+    response = client.post("/api/causal/propensity-scores", json=payload)
+    assert response.status_code == 422
+    assert "insufficient observations" in str(response.json()["detail"]).lower()
+
+
+def test_propensity_scores_separation_warnings_captured():
+    """Verify that complete separation emits warnings in model_metadata and overlap_diagnostics."""
+    # Data with complete separation: t=0 when x in [1, 2, 3], t=1 when x in [10, 11, 12]
+    data = [
+        {"t": 0, "x": 1.0},
+        {"t": 0, "x": 2.0},
+        {"t": 0, "x": 3.0},
+        {"t": 1, "x": 10.0},
+        {"t": 1, "x": 11.0},
+        {"t": 1, "x": 12.0},
+    ]
+    payload = {
+        "data": data,
+        "treatment_col": "t",
+        "confounder_cols": ["x"],
+    }
+    response = client.post("/api/causal/propensity-scores", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    # Model metadata contains separation warnings
+    warnings_list = data["model_metadata"]["warnings"]
+    assert any("separation" in w.lower() for w in warnings_list)
+
+    # Overlap diagnostics flags overlap violation
+    overlap = data["overlap_diagnostics"]
+    assert overlap["has_overlap"] is False
+    assert overlap["warning"] is not None
+    assert "disjoint" in overlap["warning"].lower() or "overlap" in overlap["warning"].lower()
+
+
+def test_causal_all_endpoints_coexist(
+    example_causal_payload,
+    example_regression_causal_payload,
+    example_propensity_payload,
+):
+    """Verify that unadjusted ATE, regression-adjusted ATE, and propensity-scores all coexist."""
+    res1 = client.post("/api/causal/unadjusted-ate", json=example_causal_payload)
+    assert res1.status_code == 200
+    assert res1.json()["estimator"] == "unadjusted_difference_in_means"
+
+    res2 = client.post("/api/causal/regression-adjusted-ate", json=example_regression_causal_payload)
+    assert res2.status_code == 200
+    assert res2.json()["estimator"] == "regression_adjusted_ate"
+
+    res3 = client.post("/api/causal/propensity-scores", json=example_propensity_payload)
+    assert res3.status_code == 200
+    assert res3.json()["estimator"] == "logistic_propensity_score"
+
+
+
 

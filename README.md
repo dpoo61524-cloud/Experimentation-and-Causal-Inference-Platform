@@ -730,6 +730,184 @@ curl -X POST http://127.0.0.1:8000/api/causal/regression-adjusted-ate \
 
 ---
 
+### Propensity Score Estimation and Diagnostics
+- **URL**: `POST /api/causal/propensity-scores`
+- **Method**: `POST`
+- **Description**: Fits a binary logistic regression model predicting treatment assignment conditional on observed baseline confounders ($e(X) = P(T = \text{treated} \mid X)$). Returns individual propensity scores aligned with dataset observation rows, empirical common support (overlap) diagnostics, and baseline pre-adjustment standardized mean differences (SMDs).
+- **Understanding Propensity Scores (Viva Concept)**:
+  - **What it is**: A propensity score estimates an observation's probability of being assigned to the **treatment group** based on their observed characteristics $X$.
+  - **What it is NOT**: It is **not** the probability of a positive outcome (e.g. conversion, recovery, or click).
+  - **Purpose**: In observational studies, treated and control subjects often differ systematically. Propensity scores reduce high-dimensional confounders into a single scalar probability, allowing researchers to evaluate overlap (common support) and balance before estimating treatment effects.
+- **Request Parameters**:
+  - `data` (list of dicts, required): Non-empty list of observation records containing treatment and confounders.
+  - `treatment_col` (string, required): Name of the binary treatment assignment column.
+  - `confounder_cols` (list of strings, required): Non-empty list of continuous or categorical confounder column names.
+  - `treated_value` (any, optional): Label identifying treated units (inferred automatically if omitted).
+  - `untreated_value` (any, optional): Label identifying control units (inferred automatically if omitted).
+  - `control_value` (any, optional): Alias for `untreated_value`.
+  - `drop_missing` (boolean, optional, default `false`): Whether to drop rows containing missing values in analysis columns.
+  - `near_zero_threshold` (float, optional, default `0.05`): Diagnostic threshold below which a score is flagged as near-zero.
+  - `near_one_threshold` (float, optional, default `0.95`): Diagnostic threshold above which a score is flagged as near-one.
+
+**Example Request**:
+```bash
+curl -X POST http://127.0.0.1:8000/api/causal/propensity-scores \
+  -H "Content-Type: application/json" \
+  -d '{
+    "data": [
+      {"treatment": 1, "age": 25, "income": 45000.0},
+      {"treatment": 1, "age": 30, "income": 52000.0},
+      {"treatment": 1, "age": 35, "income": 48000.0},
+      {"treatment": 1, "age": 40, "income": 60000.0},
+      {"treatment": 0, "age": 24, "income": 42000.0},
+      {"treatment": 0, "age": 29, "income": 50000.0},
+      {"treatment": 0, "age": 36, "income": 46000.0},
+      {"treatment": 0, "age": 42, "income": 58000.0}
+    ],
+    "treatment_col": "treatment",
+    "confounder_cols": ["age", "income"],
+    "treated_value": 1,
+    "untreated_value": 0,
+    "drop_missing": false,
+    "near_zero_threshold": 0.05,
+    "near_one_threshold": 0.95
+  }'
+```
+
+**Example Response (200 OK)**:
+```json
+{
+  "estimator": "logistic_propensity_score",
+  "propensity_scores": [
+    0.539678,
+    0.688146,
+    0.301595,
+    0.694579,
+    0.426367,
+    0.632164,
+    0.195779,
+    0.521693
+  ],
+  "scores": [
+    0.539678,
+    0.688146,
+    0.301595,
+    0.694579,
+    0.426367,
+    0.632164,
+    0.195779,
+    0.521693
+  ],
+  "observation_indices": [0, 1, 2, 3, 4, 5, 6, 7],
+  "scores_by_index": {
+    "0": 0.539678,
+    "1": 0.688146,
+    "2": 0.301595,
+    "3": 0.694579,
+    "4": 0.426367,
+    "5": 0.632164,
+    "6": 0.195779,
+    "7": 0.521693
+  },
+  "n_total": 8,
+  "n_treated": 4,
+  "n_control": 4,
+  "n_untreated": 4,
+  "treatment_col": "treatment",
+  "confounder_cols": ["age", "income"],
+  "numeric_confounders": ["age", "income"],
+  "categorical_confounders": [],
+  "treated_value": 1,
+  "control_value": 0,
+  "untreated_value": 0,
+  "rows_dropped": 0,
+  "model_features": ["const", "age", "income"],
+  "model_coefficients": {
+    "const": -4.2185,
+    "age": -0.0632,
+    "income": 0.00013
+  },
+  "model_metadata": {
+    "model_type": "LogisticRegression (sm.Logit)",
+    "converged": true,
+    "n_iterations": 6,
+    "pseudo_r2": 0.1582,
+    "features": ["const", "age", "income"],
+    "coefficients": {
+      "const": -4.2185,
+      "age": -0.0632,
+      "income": 0.00013
+    },
+    "warnings": []
+  },
+  "overlap_diagnostics": {
+    "min_score": 0.195779,
+    "max_score": 0.694579,
+    "min_score_treated": 0.301595,
+    "max_score_treated": 0.694579,
+    "min_score_control": 0.195779,
+    "max_score_control": 0.632164,
+    "treated_range": [0.301595, 0.694579],
+    "control_range": [0.195779, 0.632164],
+    "common_support_range": [0.301595, 0.632164],
+    "has_overlap": true,
+    "scores_near_zero": 0,
+    "scores_near_one": 0,
+    "treated_near_zero": 0,
+    "treated_near_one": 0,
+    "control_near_zero": 0,
+    "control_near_one": 0,
+    "near_zero_threshold": 0.05,
+    "near_one_threshold": 0.95,
+    "warning": null,
+    "interpretation": "Overlap check indicates common support is present across groups."
+  },
+  "unadjusted_covariate_balance": {
+    "age": {
+      "covariate": "age",
+      "covariate_type": "numeric",
+      "mean_treated": 32.5,
+      "mean_control": 32.75,
+      "std_treated": 6.4549,
+      "std_control": 8.0570,
+      "pooled_std": 7.3006,
+      "smd": -0.0342,
+      "abs_smd": 0.0342,
+      "zero_pooled_variance": false,
+      "is_balanced": true,
+      "note": null
+    },
+    "income": {
+      "covariate": "income",
+      "covariate_type": "numeric",
+      "mean_treated": 53750.0,
+      "mean_control": 49000.0,
+      "std_treated": 6396.6,
+      "std_control": 6976.1,
+      "pooled_std": 6692.6,
+      "smd": 0.7097,
+      "abs_smd": 0.7097,
+      "zero_pooled_variance": false,
+      "is_balanced": false,
+      "note": null
+    }
+  },
+  "covariate_balance": { "...": "alias for unadjusted_covariate_balance" },
+  "balance_assessment_type": "unadjusted",
+  "post_adjustment_balance_note": "Post-adjustment balance is evaluated in subsequent matching/weighting modules.",
+  "categorical_balance_note": "Categorical confounder balance assessment is deferred to subsequent modules.",
+  "interpretation": "Estimated propensity scores for 8 observations using 2 confounder(s)...",
+  "assumptions": "Propensity score estimation models the conditional probability of treatment assignment P(Treatment = treated | X) using observed confounders..."
+}
+```
+
+- **Important Methodological Limitations**:
+  - **No Treatment Effect**: Propensity score estimation alone does **not** estimate an average treatment effect (ATE). It is a diagnostic and design phase prerequisite for IPTW, matching, or subclassification.
+  - **Extreme Propensity Scores**: Scores very close to 0 or 1 indicate near-deterministic treatment assignment and severe lack of common support (positivity violations). In such regions, causal effects cannot be identified without extreme extrapolation.
+  - **Unmeasured Confounding**: Propensity scores balance only observed, modeled confounders. They do **not** protect against hidden or unmeasured confounders.
+
+---
+
 ## Academic Viva & Exam Notes
 
 ### 1. What is the "peeking problem" in online A/B testing?

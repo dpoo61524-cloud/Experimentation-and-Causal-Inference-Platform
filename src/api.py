@@ -29,6 +29,7 @@ from bayesian_engine import bayesian_ab_test
 from causal_engine import (
     estimate_unadjusted_ate_with_uncertainty,
     estimate_regression_adjusted_ate,
+    estimate_propensity_scores,
 )
 import numpy as np
 
@@ -1179,6 +1180,202 @@ async def regression_adjusted_ate_endpoint(
             treated_value=payload.treated_value,
             untreated_value=payload.untreated_value,
             drop_missing=payload.drop_missing,
+        )
+        return _sanitize_for_json(results)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=str(exc),
+        )
+
+
+
+class CausalPropensityScoreRequest(BaseModel):
+    data: List[Dict[str, Any]] = Field(
+        ...,
+        description="Tabular dataset as a non-empty list of observation record dictionaries.",
+        examples=[
+            [
+                {"treatment": 1, "age": 25, "income": 50000},
+                {"treatment": 1, "age": 30, "income": 60000},
+                {"treatment": 1, "age": 35, "income": 55000},
+                {"treatment": 0, "age": 22, "income": 30000},
+                {"treatment": 0, "age": 28, "income": 35000},
+                {"treatment": 0, "age": 32, "income": 32000},
+            ]
+        ],
+    )
+    treatment_col: str = Field(
+        ...,
+        description="Name of the binary treatment indicator column in the dataset.",
+        examples=["treatment"],
+    )
+    confounder_cols: List[str] = Field(
+        ...,
+        description="Non-empty list of confounder/covariate column names to model treatment assignment.",
+        examples=[["age", "income"]],
+    )
+    treated_value: Optional[Any] = Field(
+        None,
+        description="Optional label identifying treated observations. Inferred automatically if omitted.",
+        examples=[1],
+    )
+    untreated_value: Optional[Any] = Field(
+        None,
+        description="Optional label identifying control/untreated observations. Inferred automatically if omitted.",
+        examples=[0],
+    )
+    control_value: Optional[Any] = Field(
+        None,
+        description="Alias for untreated_value.",
+        examples=[0],
+    )
+    drop_missing: bool = Field(
+        default=False,
+        description="Whether to explicitly drop rows with missing values across analysis columns. Default is false.",
+        examples=[False],
+    )
+    near_zero_threshold: float = Field(
+        default=0.05,
+        description="Diagnostic threshold below which a score is flagged as near-zero.",
+        examples=[0.05],
+    )
+    near_one_threshold: float = Field(
+        default=0.95,
+        description="Diagnostic threshold above which a score is flagged as near-one.",
+        examples=[0.95],
+    )
+
+    @field_validator("data")
+    @classmethod
+    def validate_data_list(cls, v: Any) -> List[Dict[str, Any]]:
+        if not isinstance(v, list):
+            raise ValueError("data must be a list of observation dictionaries.")
+        if len(v) == 0:
+            raise ValueError("data cannot be empty. Propensity score estimation requires observations.")
+        for idx, row in enumerate(v):
+            if not isinstance(row, dict):
+                raise ValueError(f"Observation at index {idx} must be a dictionary, got {type(row).__name__}.")
+        return v
+
+    @field_validator("treatment_col")
+    @classmethod
+    def validate_treatment_col(cls, v: Any) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("treatment_col must be a non-empty string.")
+        return v.strip()
+
+    @field_validator("confounder_cols")
+    @classmethod
+    def validate_confounders(cls, v: Any) -> List[str]:
+        if not isinstance(v, list):
+            raise ValueError("confounder_cols must be a list of column names.")
+        if len(v) == 0:
+            raise ValueError("confounder_cols must contain at least one column name.")
+        clean_cols = []
+        for idx, col in enumerate(v):
+            if not isinstance(col, str) or not col.strip():
+                raise ValueError(f"Confounder column at index {idx} must be a non-empty string.")
+            clean_cols.append(col.strip())
+        return clean_cols
+
+    @field_validator("drop_missing")
+    @classmethod
+    def validate_drop_missing(cls, v: Any) -> bool:
+        if not isinstance(v, bool):
+            raise ValueError("drop_missing must be a boolean.")
+        return v
+
+    @field_validator("near_zero_threshold", "near_one_threshold")
+    @classmethod
+    def validate_thresholds(cls, v: Any, info: Any) -> float:
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError(f"{info.field_name} must be a numeric float.")
+        fv = float(v)
+        if math.isnan(fv) or math.isinf(fv):
+            raise ValueError(f"{info.field_name} must be a finite number.")
+        if not (0.0 <= fv <= 1.0):
+            raise ValueError(f"{info.field_name} must be within the probability range [0, 1].")
+        return fv
+
+    @model_validator(mode="after")
+    def validate_model_consistency(self) -> "CausalPropensityScoreRequest":
+        for col in self.confounder_cols:
+            if col == self.treatment_col:
+                raise ValueError(
+                    f"Confounder column '{col}' cannot also be the treatment column."
+                )
+        if len(self.confounder_cols) != len(set(self.confounder_cols)):
+            raise ValueError(
+                f"confounder_cols contains duplicate column names: {self.confounder_cols}."
+            )
+        if self.near_zero_threshold >= self.near_one_threshold:
+            raise ValueError(
+                f"near_zero_threshold ({self.near_zero_threshold}) must be strictly less than "
+                f"near_one_threshold ({self.near_one_threshold})."
+            )
+        return self
+
+
+class CausalPropensityScoreResponse(BaseModel):
+    estimator: str = Field(..., description="Name of the estimator used (logistic_propensity_score)")
+    propensity_scores: List[float] = Field(..., description="Estimated propensity scores P(Treatment = treated | X) in observation order")
+    scores: List[float] = Field(..., description="Alias for propensity_scores")
+    observation_indices: List[Any] = Field(..., description="Original dataset row indices corresponding to each score")
+    scores_by_index: Dict[Any, float] = Field(..., description="Mapping of observation index to estimated propensity score")
+    n_total: int = Field(..., description="Total number of observations used in model fitting")
+    n_treated: int = Field(..., description="Number of treated observations")
+    n_control: int = Field(..., description="Number of control/untreated observations")
+    n_untreated: int = Field(..., description="Alias for n_control")
+    treatment_col: str = Field(..., description="Name of the treatment column")
+    confounder_cols: List[str] = Field(..., description="List of confounder column names")
+    numeric_confounders: List[str] = Field(..., description="List of continuous numeric confounder columns")
+    categorical_confounders: List[str] = Field(..., description="List of categorical confounder columns")
+    treated_value: Any = Field(..., description="Resolved value representing the treated condition")
+    control_value: Any = Field(..., description="Resolved value representing the control condition")
+    untreated_value: Any = Field(..., description="Alias for control_value")
+    rows_dropped: int = Field(0, description="Number of rows dropped due to missing data")
+    model_features: List[str] = Field(..., description="Feature column names included in the design matrix")
+    model_coefficients: Dict[str, float] = Field(..., description="Estimated logistic regression coefficients")
+    model_metadata: Dict[str, Any] = Field(..., description="Model optimization metadata, convergence status, and warnings")
+    overlap_diagnostics: Dict[str, Any] = Field(..., description="Comprehensive overlap and common support diagnostics")
+    unadjusted_covariate_balance: Dict[str, Any] = Field(..., description="Baseline unadjusted standardized mean differences")
+    covariate_balance: Dict[str, Any] = Field(..., description="Alias for unadjusted_covariate_balance")
+    balance_assessment_type: str = Field(..., description="Type of balance assessment (unadjusted)")
+    post_adjustment_balance_note: Optional[str] = Field(None, description="Note regarding post-adjustment balance evaluation")
+    categorical_balance_note: Optional[str] = Field(None, description="Note regarding categorical confounder balance")
+    interpretation: str = Field(..., description="Interpretation of propensity score distribution and overlap")
+    assumptions: str = Field(..., description="Educational explanation of identifying assumptions and confounding limitations")
+
+
+@app.post(
+    "/api/causal/propensity-scores",
+    response_model=CausalPropensityScoreResponse,
+    tags=["Causal Inference"],
+    summary="Estimate propensity scores and overlap diagnostics",
+)
+async def propensity_scores_endpoint(
+    payload: CausalPropensityScoreRequest,
+) -> Dict[str, Any]:
+    """Estimate propensity scores and compute overlap and balance diagnostics.
+
+    Fits a binary logistic regression model of treatment assignment on observed confounders,
+    returns the predicted conditional probability P(T = treated | X) for each observation,
+    evaluates common support and positivity overlap diagnostics, and computes baseline
+    unadjusted covariate balance (SMDs).
+    """
+    try:
+        untreated_val = payload.untreated_value if payload.untreated_value is not None else payload.control_value
+        results = estimate_propensity_scores(
+            data=payload.data,
+            treatment_col=payload.treatment_col,
+            confounder_cols=payload.confounder_cols,
+            treated_value=payload.treated_value,
+            untreated_value=untreated_val,
+            control_value=untreated_val,
+            drop_missing=payload.drop_missing,
+            near_zero_threshold=payload.near_zero_threshold,
+            near_one_threshold=payload.near_one_threshold,
         )
         return _sanitize_for_json(results)
     except ValueError as exc:
