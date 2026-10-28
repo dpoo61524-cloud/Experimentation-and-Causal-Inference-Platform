@@ -41,9 +41,11 @@ from causal_engine import (
 from dataset_manager import (
     DatasetIngestionResponse,
     default_dataset_manager,
+    MISSING_TOKENS,
 )
 from urllib.parse import unquote
 import numpy as np
+import pandas as pd
 
 app = FastAPI(
     title="Experimentation and Causal Inference Platform API",
@@ -1127,6 +1129,204 @@ async def unadjusted_ate_endpoint(
             drop_missing=payload.drop_missing,
             confidence_level=payload.confidence_level,
         )
+        return _sanitize_for_json(results)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=str(exc),
+        )
+
+
+class DatasetUnadjustedATERequest(BaseModel):
+    treatment_col: str = Field(
+        ...,
+        description="Name of the binary treatment indicator column in the dataset.",
+        examples=["treatment"],
+    )
+    outcome_col: str = Field(
+        ...,
+        description="Name of the numeric outcome column in the dataset.",
+        examples=["outcome"],
+    )
+    treated_value: Optional[Any] = Field(
+        None,
+        description="Optional label identifying treated observations. Inferred automatically if omitted.",
+        examples=[1],
+    )
+    untreated_value: Optional[Any] = Field(
+        None,
+        description="Optional label identifying control/untreated observations. Inferred automatically if omitted.",
+        examples=[0],
+    )
+    drop_missing: bool = Field(
+        default=False,
+        description="Whether to explicitly drop rows with missing values across analysis columns. Default is false.",
+        examples=[False],
+    )
+    confidence_level: float = Field(
+        default=0.95,
+        description="Two-sided confidence level strictly between 0 and 1 (exclusive). Default is 0.95.",
+        examples=[0.95],
+    )
+
+    @field_validator("confidence_level")
+    @classmethod
+    def validate_confidence_level(cls, v: Any) -> float:
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError("confidence_level must be a numeric float strictly between 0 and 1.")
+        fv = float(v)
+        if math.isnan(fv) or math.isinf(fv) or not (0.0 < fv < 1.0):
+            raise ValueError("confidence_level must be strictly between 0 and 1 (exclusive).")
+        return fv
+
+    @field_validator("treatment_col", "outcome_col")
+    @classmethod
+    def validate_non_empty_column_name(cls, v: Any, info: Any) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError(f"{info.field_name} must be a non-empty string.")
+        return v.strip()
+
+    @model_validator(mode="after")
+    def validate_distinct_columns(self) -> "DatasetUnadjustedATERequest":
+        if self.treatment_col and self.outcome_col:
+            if self.treatment_col.strip() == self.outcome_col.strip():
+                raise ValueError(
+                    f"treatment_col and outcome_col cannot be the same column ('{self.treatment_col}')."
+                )
+        return self
+
+
+class DatasetCausalUnadjustedATEResponse(CausalUnadjustedATEResponse):
+    dataset_id: str = Field(..., description="Unique opaque dataset identifier")
+    dataset_filename: str = Field(..., description="Original filename of the stored dataset evaluated")
+    total_dataset_rows: int = Field(..., description="Total rows in the stored dataset before dropping missing values")
+
+
+def _coerce_label_to_series_dtype(label: Any, series: pd.Series) -> Any:
+    """Coerce user-specified treatment/control label to match series dtype if compatible."""
+    if label is None:
+        return None
+    try:
+        if (series == label).any():
+            return label
+    except Exception:
+        pass
+
+    if pd.api.types.is_integer_dtype(series):
+        try:
+            val = int(label)
+            if (series == val).any():
+                return val
+        except (ValueError, TypeError):
+            pass
+
+    if pd.api.types.is_float_dtype(series):
+        try:
+            val = float(label)
+            if (series == val).any():
+                return val
+        except (ValueError, TypeError):
+            pass
+
+    if pd.api.types.is_bool_dtype(series):
+        str_val = str(label).strip().lower()
+        if str_val in ("true", "1", "t", "yes"):
+            return True
+        if str_val in ("false", "0", "f", "no"):
+            return False
+
+    return label
+
+
+@app.post(
+    "/api/dataset/{dataset_id}/causal/unadjusted-ate",
+    response_model=DatasetCausalUnadjustedATEResponse,
+    tags=["Causal Inference", "Datasets"],
+    summary="Estimate unadjusted ATE for a stored dataset",
+)
+async def dataset_unadjusted_ate_endpoint(
+    dataset_id: str,
+    payload: DatasetUnadjustedATERequest,
+) -> Dict[str, Any]:
+    """Estimate the unadjusted Average Treatment Effect (ATE) for a cataloged dataset on disk.
+
+    Validates dataset access and column existence, loads only the relevant treatment
+    and outcome columns into memory, enforces missing-data policy, and computes
+    Welch-style uncertainty estimates.
+    """
+    dataset_meta = default_dataset_manager.get_dataset(dataset_id)
+    if dataset_meta is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Dataset '{dataset_id}' not found or has expired.",
+        )
+
+    file_path = default_dataset_manager.get_dataset_file_path(dataset_id)
+    if file_path is None or not file_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Dataset file for '{dataset_id}' is not available on disk.",
+        )
+
+    available_cols = [c.name for c in dataset_meta.columns]
+    if payload.treatment_col not in available_cols:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=(
+                f"Treatment column '{payload.treatment_col}' not found in dataset. "
+                f"Available columns: {available_cols}"
+            ),
+        )
+    if payload.outcome_col not in available_cols:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=(
+                f"Outcome column '{payload.outcome_col}' not found in dataset. "
+                f"Available columns: {available_cols}"
+            ),
+        )
+
+    if dataset_meta.row_count == 0:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail="Dataset is empty (0 rows). Causal inference requires observations in both treatment groups.",
+        )
+
+    try:
+        df = pd.read_csv(
+            file_path,
+            usecols=[payload.treatment_col, payload.outcome_col],
+            na_values=list(MISSING_TOKENS),
+            keep_default_na=True,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=f"Failed to read dataset columns: {exc}",
+        )
+
+    if df.empty:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail="Dataset is empty (0 rows). Causal inference requires observations in both treatment groups.",
+        )
+
+    resolved_treated = _coerce_label_to_series_dtype(payload.treated_value, df[payload.treatment_col])
+    resolved_untreated = _coerce_label_to_series_dtype(payload.untreated_value, df[payload.treatment_col])
+
+    try:
+        results = estimate_unadjusted_ate_with_uncertainty(
+            data=df,
+            treatment_col=payload.treatment_col,
+            outcome_col=payload.outcome_col,
+            treated_value=resolved_treated,
+            untreated_value=resolved_untreated,
+            drop_missing=payload.drop_missing,
+            confidence_level=payload.confidence_level,
+        )
+        results["dataset_id"] = dataset_id
+        results["dataset_filename"] = dataset_meta.filename
+        results["total_dataset_rows"] = dataset_meta.row_count
         return _sanitize_for_json(results)
     except ValueError as exc:
         raise HTTPException(

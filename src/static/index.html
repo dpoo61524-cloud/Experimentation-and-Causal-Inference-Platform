@@ -32,7 +32,7 @@
 
         <!-- Stage Notice Banner -->
         <div class="info-banner" role="region" aria-label="Development Notice">
-            <strong>Stage 7.3 Data Ingestion:</strong> Dataset ingestion, schema inspection, and benchmark dataset loading are active below. Interactive execution of the six causal estimators will be connected in Stages 7.4 through 7.6. All statistical calculations are executed by the FastAPI causal engine.
+            <strong>Stage 7.4A Active:</strong> Dataset ingestion, schema inspection, and Unadjusted ATE estimation from stored datasets are fully operational. All statistical calculations are executed by the FastAPI causal engine.
         </div>
 
         <!-- Section 1: Dataset Ingestion & Schema Inspector -->
@@ -149,10 +149,161 @@
             </div>
         </section>
 
-        <!-- Section 2: Available Causal Analysis Methods -->
+        <!-- Section 2: Causal Analysis — Unadjusted ATE -->
+        <section class="section-card" id="causal-analysis-section" aria-labelledby="causal-analysis-heading">
+            <div class="section-header">
+                <h3 id="causal-analysis-heading">2. Causal Analysis: Unadjusted Average Treatment Effect (ATE)</h3>
+                <p>Estimate the difference in sample means with Welch-style robust standard errors and confidence intervals from an active dataset.</p>
+            </div>
+
+            <!-- Analysis Status / Alert Banner -->
+            <div id="ate-status-banner" class="status-indicator" role="alert" aria-live="polite"></div>
+
+            <!-- Unloaded Dataset Notice -->
+            <div id="ate-unloaded-notice" class="empty-state-box">
+                <p class="empty-state-title">No Active Dataset Available for Analysis</p>
+                <p class="empty-state-desc">Upload a CSV or load the Hillstrom benchmark dataset in Section 1 above to enable causal analysis and column selection.</p>
+                <p class="empty-state-note">Status: Awaiting dataset ingestion</p>
+            </div>
+
+            <!-- Form & Results Container (Hidden until a dataset is loaded) -->
+            <div id="ate-form-container" style="display: none;">
+                <!-- Selected Dataset Context Box -->
+                <div class="active-dataset-meta-box">
+                    <span class="meta-item"><strong>Active Dataset:</strong> <span id="ate-dataset-name">—</span></span>
+                    <span class="meta-item"><strong>Dataset ID:</strong> <code id="ate-dataset-id">—</code></span>
+                    <span class="meta-item"><strong>Total Rows:</strong> <span id="ate-dataset-rows">—</span></span>
+                    <span class="meta-item"><strong>Total Columns:</strong> <span id="ate-dataset-cols">—</span></span>
+                </div>
+
+                <form id="ate-analysis-form" class="analysis-form" onsubmit="return false;">
+                    <div class="form-row-grid">
+                        <!-- Treatment Column -->
+                        <div class="form-group">
+                            <label for="ate-treatment-select">Treatment Column (Binary <span class="required">*</span>)</label>
+                            <select id="ate-treatment-select" class="form-select" required aria-label="Select treatment column">
+                                <option value="">-- Choose treatment column --</option>
+                            </select>
+                            <span class="field-hint">Binary indicator column (e.g. 0/1, True/False, treat/control).</span>
+                        </div>
+
+                        <!-- Outcome Column -->
+                        <div class="form-group">
+                            <label for="ate-outcome-select">Outcome Column (Numeric <span class="required">*</span>)</label>
+                            <select id="ate-outcome-select" class="form-select" required aria-label="Select outcome column">
+                                <option value="">-- Choose outcome column --</option>
+                            </select>
+                            <span class="field-hint">Numeric response variable evaluated across treatment conditions.</span>
+                        </div>
+                    </div>
+
+                    <!-- Optional Settings Row -->
+                    <div class="form-row-grid" style="margin-top: 14px;">
+                        <div class="form-group">
+                            <label for="ate-treated-val-input">Treated Value Label (Optional)</label>
+                            <input type="text" id="ate-treated-val-input" class="form-input" placeholder="Auto-inferred if empty (e.g. 1)">
+                            <span class="field-hint">Leave blank to auto-infer from binary values.</span>
+                        </div>
+                        <div class="form-group">
+                            <label for="ate-untreated-val-input">Control / Untreated Value Label (Optional)</label>
+                            <input type="text" id="ate-untreated-val-input" class="form-input" placeholder="Auto-inferred if empty (e.g. 0)">
+                            <span class="field-hint">Leave blank to auto-infer from binary values.</span>
+                        </div>
+                        <div class="form-group">
+                            <label for="ate-ci-level-input">Confidence Level (0 &lt; &alpha; &lt; 1)</label>
+                            <input type="number" id="ate-ci-level-input" class="form-input" min="0.01" max="0.99" step="0.01" value="0.95">
+                            <span class="field-hint">Default 0.95 (95% two-sided Welch confidence interval).</span>
+                        </div>
+                    </div>
+
+                    <div class="form-checkbox-row">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="ate-drop-missing-checkbox">
+                            <span><strong>Explicitly drop rows with missing values</strong> (<code>drop_missing=true</code>)</span>
+                        </label>
+                        <p class="field-hint" style="margin-left: 23px; margin-top: 2px;">
+                            When unchecked (default), analysis fails cleanly if missing values exist in the chosen columns.
+                        </p>
+                    </div>
+
+                    <div class="form-actions-row">
+                        <button type="submit" id="run-ate-btn" class="btn btn-primary" disabled>
+                            Run Unadjusted ATE Analysis
+                        </button>
+                    </div>
+                </form>
+
+                <!-- Results Display Panel (Hidden until analysis succeeds) -->
+                <div id="ate-results-panel" style="display: none;">
+                    <div class="results-header-block">
+                        <h4 style="font-size: 15px; font-weight: 600; color: var(--primary-charcoal); margin-bottom: 4px;">
+                            Unadjusted ATE Results &amp; Statistical Diagnostics
+                        </h4>
+                        <p class="table-footnote">
+                            Computed by backend causal engine using Welch robust standard errors. All records evaluated without sampling or truncation.
+                        </p>
+                    </div>
+
+                    <!-- Dataset & Sample Accounting Banner -->
+                    <div class="accounting-card">
+                        <span class="acc-item"><strong>Evaluated Dataset:</strong> <span id="res-dataset-name">—</span></span>
+                        <span class="acc-item"><strong>Total Stored Rows:</strong> <span id="res-total-rows">—</span></span>
+                        <span class="acc-item"><strong>Evaluated Observations:</strong> <span id="res-eval-rows">—</span></span>
+                        <span class="acc-item"><strong>Rows Dropped (Missing):</strong> <span id="res-dropped-rows">—</span></span>
+                    </div>
+
+                    <!-- Primary Statistics KPI Grid -->
+                    <div class="results-kpi-grid">
+                        <div class="res-kpi-card highlight-card">
+                            <div class="res-kpi-label">Estimated ATE (&tau;&#770;)</div>
+                            <div id="res-ate-point" class="res-kpi-val">—</div>
+                            <div class="res-kpi-sub">Difference in sample means</div>
+                        </div>
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Welch Standard Error</div>
+                            <div id="res-ate-se" class="res-kpi-val">—</div>
+                            <div class="res-kpi-sub">Robust to unequal variances</div>
+                        </div>
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Confidence Interval</div>
+                            <div id="res-ate-ci" class="res-kpi-val" style="font-size: 15px;">—</div>
+                            <div id="res-ate-ci-sub" class="res-kpi-sub">Two-sided Welch interval</div>
+                        </div>
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Treated Mean (Y&#772;&#8321;)</div>
+                            <div id="res-mean-treated" class="res-kpi-val">—</div>
+                            <div id="res-count-treated" class="res-kpi-sub">N&#8321; = —</div>
+                        </div>
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Control Mean (Y&#772;&#8320;)</div>
+                            <div id="res-mean-control" class="res-kpi-val">—</div>
+                            <div id="res-count-control" class="res-kpi-sub">N&#8320; = —</div>
+                        </div>
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Degrees of Freedom (df)</div>
+                            <div id="res-ate-df" class="res-kpi-val">—</div>
+                            <div class="res-kpi-sub">Welch–Satterthwaite approx</div>
+                        </div>
+                    </div>
+
+                    <!-- Interpretation & Assumptions Text Blocks -->
+                    <div class="interpretation-block">
+                        <h5>Statistical Interpretation</h5>
+                        <p id="res-interpretation-text">—</p>
+                    </div>
+
+                    <div class="assumptions-block">
+                        <h5>Identification Assumptions &amp; Limitations</h5>
+                        <p id="res-assumptions-text">—</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 3: Available Causal Analysis Methods -->
         <section class="section-card" aria-labelledby="methods-heading">
             <div class="section-header">
-                <h3 id="methods-heading">2. Available Causal Analysis Methods</h3>
+                <h3 id="methods-heading">3. Available Causal Analysis Methods</h3>
                 <p>Six estimators designed for experimental and observational causal inference with explicit identification assumptions.</p>
             </div>
 
