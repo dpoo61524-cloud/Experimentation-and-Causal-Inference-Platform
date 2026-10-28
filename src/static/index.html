@@ -32,7 +32,7 @@
 
         <!-- Stage Notice Banner -->
         <div class="info-banner" role="region" aria-label="Development Notice">
-            <strong>Stage 7.6A Active:</strong> Dataset ingestion, schema inspection, Unadjusted ATE, Regression-Adjusted ATE, Propensity Score Estimation, Inverse Probability of Treatment Weighting (IPTW), and Difference-in-Differences (DiD) are fully operational. All statistical calculations are executed by the FastAPI causal engine.
+            <strong>Stage 7.6B Active:</strong> Dataset ingestion, schema inspection, Unadjusted ATE, Regression-Adjusted ATE, Propensity Score Estimation, Inverse Probability of Treatment Weighting (IPTW), Difference-in-Differences (DiD), and Causal Sensitivity Analysis are fully operational. All statistical calculations are executed by the FastAPI causal engine.
         </div>
 
         <!-- Section 1: Dataset Ingestion & Schema Inspector -->
@@ -1111,10 +1111,274 @@
             </div>
         </section>
 
-        <!-- Section 7: Available Causal Analysis Methods -->
+        <!-- Section 7: Causal Sensitivity Analysis & Robustness Checks -->
+        <section id="sensitivity-analysis-section" class="section-card" aria-labelledby="sensitivity-analysis-heading">
+            <div class="section-header">
+                <h3 id="sensitivity-analysis-heading">7. Causal Sensitivity Analysis &amp; Robustness Checks</h3>
+                <p>Evaluate the vulnerability of causal estimates across alternative estimators, IPTW weight truncation thresholds, and hypothetical unmeasured confounding bias scenarios.</p>
+            </div>
+
+            <!-- Status Banner for Sensitivity Analysis -->
+            <div id="sens-status-banner" class="status-indicator" role="status" aria-live="polite"></div>
+
+            <!-- Unloaded State Notice -->
+            <div id="sens-unloaded-notice" class="empty-state">
+                <p>No dataset selected for sensitivity analysis. Ingest a CSV dataset or load the Hillstrom benchmark above to enable sensitivity and robustness checks.</p>
+            </div>
+
+            <!-- Interactive Form Container -->
+            <div id="sens-form-container" style="display: none;">
+                <!-- Active Dataset Context Badge -->
+                <div class="active-dataset-meta-box">
+                    <span class="meta-item"><strong>Active Dataset:</strong> <span id="sens-dataset-name">—</span></span>
+                    <span class="meta-item"><strong>Dataset ID:</strong> <span id="sens-dataset-id" class="code-id">—</span></span>
+                    <span class="meta-item"><strong>Total Records:</strong> <span id="sens-dataset-rows">—</span></span>
+                    <span class="meta-item"><strong>Columns:</strong> <span id="sens-dataset-cols">—</span></span>
+                </div>
+
+                <!-- Educational Notice Banner for Sensitivity -->
+                <div class="info-banner" style="margin-top: 12px; margin-bottom: 14px;">
+                    <strong>Methodology &amp; Purpose:</strong> Sensitivity analysis assesses whether qualitative conclusions depend critically on modeling assumptions or unmeasured confounding. Evaluates three complementary dimensions:
+                    (1) <em>Multi-Estimator Comparison</em> across Unadjusted ATE, Regression Adjustment (G-computation), and IPTW;
+                    (2) <em>IPTW Weight Truncation Robustness</em> across upper weight thresholds; and
+                    (3) <em>Hypothetical Unmeasured Confounding</em> under signed additive bias scenarios: &tau;<sub>adjusted</sub>(b) = &tau;<sub>observed</sub> &minus; b.
+                    <strong>Critical limitation:</strong> Sensitivity analysis explores hypothetical scenarios; it does NOT prove the absence of unmeasured confounding.
+                </div>
+
+                <!-- Mode Selection Radios -->
+                <div class="form-group" style="margin-bottom: 12px;">
+                    <label style="font-weight: 600;">Analysis Mode</label>
+                    <div style="display: flex; gap: 20px; margin-top: 6px;">
+                        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                            <input type="radio" name="sens-mode" id="sens-mode-dataset" value="dataset" checked />
+                            <span><strong>Full Dataset Mode:</strong> Compare multi-estimators, IPTW truncation, and unmeasured confounding on data columns</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                            <input type="radio" name="sens-mode" id="sens-mode-standalone" value="standalone" />
+                            <span><strong>Observed Estimate Mode:</strong> Evaluate hypothetical bias scenarios on a precomputed treatment effect</span>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Dataset Mode Fields -->
+                <div id="sens-dataset-fields">
+                    <div class="form-grid">
+                        <!-- Treatment Column -->
+                        <div class="form-group">
+                            <label for="sens-treatment-select">Treatment Column <span class="required">*</span></label>
+                            <select id="sens-treatment-select" class="form-control">
+                                <option value="">-- Choose treatment column --</option>
+                            </select>
+                            <small class="form-hint">Binary treatment indicator column.</small>
+                        </div>
+
+                        <!-- Outcome Column -->
+                        <div class="form-group">
+                            <label for="sens-outcome-select">Outcome Column <span class="required">*</span></label>
+                            <select id="sens-outcome-select" class="form-control">
+                                <option value="">-- Choose outcome column --</option>
+                            </select>
+                            <small class="form-hint">Continuous or integer numeric outcome variable.</small>
+                        </div>
+
+                        <!-- Reference Estimator -->
+                        <div class="form-group">
+                            <label for="sens-ref-estimator-select">Reference Estimator</label>
+                            <select id="sens-ref-estimator-select" class="form-control">
+                                <option value="regression_adjusted">Regression-Adjusted ATE (G-computation)</option>
+                                <option value="iptw">Inverse Probability of Treatment Weighting (IPTW)</option>
+                                <option value="unadjusted">Unadjusted Difference in Means</option>
+                            </select>
+                            <small class="form-hint">Baseline benchmark estimator to compare alternatives against.</small>
+                        </div>
+                    </div>
+
+                    <!-- Confounder Checkboxes Grid -->
+                    <div class="form-group" style="margin-top: 12px;">
+                        <label>Observed Confounders for Adjustment &amp; IPTW</label>
+                        <small class="form-hint" style="display: block; margin-bottom: 6px;">Select observed covariates to include in regression adjustment and propensity score models.</small>
+                        <div id="sens-confounders-container" class="confounders-checkbox-grid">
+                            <!-- Populated dynamically -->
+                        </div>
+                    </div>
+
+                    <!-- IPTW Truncation Thresholds Input -->
+                    <div class="form-group" style="margin-top: 12px;">
+                        <label for="sens-truncation-thresholds-input">IPTW Weight Truncation Thresholds (Optional)</label>
+                        <input type="text" id="sens-truncation-thresholds-input" class="form-control" placeholder="e.g. 10.0, 5.0, 3.0" value="10.0, 5.0, 3.0" />
+                        <small class="form-hint">Comma-separated upper bounds for weight clipping robustness analysis. Leave blank to omit.</small>
+                    </div>
+                </div>
+
+                <!-- Standalone / Observed Estimate Mode Fields (Hidden by default) -->
+                <div id="sens-standalone-fields" style="display: none;">
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label for="sens-observed-estimate-input">Observed Treatment Effect Estimate (&tau;) <span class="required">*</span></label>
+                            <input type="number" id="sens-observed-estimate-input" class="form-control" step="any" placeholder="e.g. 5.0 or 0.85" />
+                            <small class="form-hint">Precomputed point estimate from any completed causal analysis.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="sens-ci-lower-input">95% CI Lower Bound (Optional)</label>
+                            <input type="number" id="sens-ci-lower-input" class="form-control" step="any" placeholder="e.g. 2.0" />
+                            <small class="form-hint">Lower confidence limit for testing coverage across zero.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="sens-ci-upper-input">95% CI Upper Bound (Optional)</label>
+                            <input type="number" id="sens-ci-upper-input" class="form-control" step="any" placeholder="e.g. 8.0" />
+                            <small class="form-hint">Upper confidence limit for testing coverage across zero.</small>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Hypothetical Confounding Bias Scenarios Input (Shared) -->
+                <div class="form-group" style="margin-top: 14px;">
+                    <label for="sens-biases-input">Hypothetical Confounding Bias Values (b) <span class="required">*</span></label>
+                    <input type="text" id="sens-biases-input" class="form-control" placeholder="e.g. -2.0, -1.0, 0.0, 1.0, 2.0" value="-2.0, -1.0, 0.0, 1.0, 2.0" />
+                    <small class="form-hint">Comma-separated signed additive bias scenarios: &tau;<sub>adj</sub> = &tau;<sub>obs</sub> &minus; b. Positive b assumes unmeasured confounding inflated the observed effect; negative b assumes suppression.</small>
+                </div>
+
+                <!-- Missing Data Policy Checkbox -->
+                <div class="form-group" style="margin-top: 12px;">
+                    <label class="checkbox-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                        <input type="checkbox" id="sens-drop-missing-checkbox" />
+                        <span><strong>Explicit Missing Data Policy:</strong> Drop rows with missing values in analysis columns (default: reject missing data with HTTP 422).</span>
+                    </label>
+                </div>
+
+                <!-- Submit Button -->
+                <div class="form-actions" style="margin-top: 16px;">
+                    <button id="run-sensitivity-btn" type="button" class="btn btn-primary" disabled>
+                        Run Causal Sensitivity Analysis
+                    </button>
+                </div>
+
+                <!-- Results Panel (Hidden until analysis succeeds) -->
+                <div id="sens-results-panel" style="display: none; margin-top: 20px;">
+                    <!-- Active Dataset Accounting Card -->
+                    <div class="active-dataset-meta-box" style="margin-bottom: 16px; background-color: var(--white-surface);">
+                        <span class="meta-item"><strong>Analyzed Dataset:</strong> <span id="res-sens-dataset-name">—</span></span>
+                        <span class="meta-item"><strong>Total Stored Records:</strong> <span id="res-sens-total-rows">—</span></span>
+                        <span class="meta-item"><strong>Reference Estimator:</strong> <span id="res-sens-ref-estimator-name">—</span></span>
+                        <span class="meta-item"><strong>Baseline Estimate:</strong> <span id="res-sens-baseline-val" style="font-family: var(--font-mono); font-weight: 700;">—</span></span>
+                    </div>
+
+                    <!-- Primary KPI Grid -->
+                    <div class="results-kpi-grid">
+                        <div class="res-kpi-card highlight-card">
+                            <div class="res-kpi-label">Reference Effect (&tau;<sub>ref</sub>)</div>
+                            <div id="res-sens-ref-kpi" class="res-kpi-val">—</div>
+                            <div id="res-sens-ref-sub" class="res-kpi-sub">Baseline estimate</div>
+                        </div>
+
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Multi-Estimator Spread</div>
+                            <div id="res-sens-spread-val" class="res-kpi-val">—</div>
+                            <div id="res-sens-spread-sub" class="res-kpi-sub">Max &minus; Min across estimators</div>
+                        </div>
+
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Evaluated Bias Scenarios</div>
+                            <div id="res-sens-scenarios-cnt" class="res-kpi-val">—</div>
+                            <div id="res-sens-scenarios-sub" class="res-kpi-sub">Hypothetical bias values</div>
+                        </div>
+
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Zero Crossing Coverage</div>
+                            <div id="res-sens-zero-crossings" class="res-kpi-val">—</div>
+                            <div id="res-sens-zero-sub" class="res-kpi-sub">Scenarios where 95% CI covers 0</div>
+                        </div>
+                    </div>
+
+                    <!-- 1. Multi-Estimator Comparison Table -->
+                    <div id="sens-estimator-container" class="table-container" style="margin-top: 16px;">
+                        <h4 style="margin: 0 0 8px 0; font-size: 14px; font-weight: 600; color: var(--primary-charcoal);">
+                            1. Multi-Estimator Cross-Comparison
+                        </h4>
+                        <table id="sens-estimator-table" class="summary-table">
+                            <thead>
+                                <tr>
+                                    <th>Causal Estimator</th>
+                                    <th>Status</th>
+                                    <th style="text-align: right;">Point Estimate</th>
+                                    <th style="text-align: right;">Diff from Reference (&Delta;&tau;)</th>
+                                    <th style="text-align: right;">95% Confidence Interval</th>
+                                </tr>
+                            </thead>
+                            <tbody id="sens-estimator-tbody">
+                                <!-- Populated dynamically -->
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- 2. IPTW Weight Truncation Robustness Table -->
+                    <div id="sens-truncation-container" class="table-container" style="margin-top: 16px;">
+                        <h4 style="margin: 0 0 8px 0; font-size: 14px; font-weight: 600; color: var(--primary-charcoal);">
+                            2. IPTW Weight Truncation Robustness Checks
+                        </h4>
+                        <table id="sens-truncation-table" class="summary-table">
+                            <thead>
+                                <tr>
+                                    <th style="text-align: right;">Max Weight Threshold</th>
+                                    <th style="text-align: right;">Truncated Estimate</th>
+                                    <th style="text-align: right;">Diff from Untruncated</th>
+                                    <th style="text-align: right;">Weights Clipped</th>
+                                    <th style="text-align: right;">Kish Effective Sample Size (ESS)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="sens-truncation-tbody">
+                                <!-- Populated dynamically -->
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- 3. Hypothetical Unmeasured Confounding Scenarios Table -->
+                    <div id="sens-scenarios-container" class="table-container" style="margin-top: 16px;">
+                        <h4 style="margin: 0 0 8px 0; font-size: 14px; font-weight: 600; color: var(--primary-charcoal);">
+                            3. Unmeasured Confounding Hypothetical Bias Scenarios (&tau;<sub>adj</sub> = &tau;<sub>obs</sub> &minus; b)
+                        </h4>
+                        <table id="sens-scenarios-table" class="summary-table">
+                            <thead>
+                                <tr>
+                                    <th style="text-align: right;">Hypothetical Bias (b)</th>
+                                    <th style="text-align: right;">Adjusted Estimate (&tau;<sub>adj</sub>)</th>
+                                    <th style="text-align: right;">Adjusted 95% Confidence Interval</th>
+                                    <th>Spans Zero?</th>
+                                    <th>Interpretation Note</th>
+                                </tr>
+                            </thead>
+                            <tbody id="sens-scenarios-tbody">
+                                <!-- Populated dynamically -->
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- Diagnostic Warnings Card -->
+                    <div id="sens-warnings-card" class="info-banner" style="display: none; margin-top: 16px; border-left-color: #D97706; background-color: #FFFBEB;">
+                        <strong style="color: #B45309;">Methodological Notices &amp; Warnings:</strong>
+                        <ul id="sens-warnings-list" style="margin: 6px 0 0 16px; padding: 0; font-size: 12px; color: #92400E;">
+                            <!-- Populated dynamically -->
+                        </ul>
+                    </div>
+
+                    <!-- Interpretation & Assumptions Blocks -->
+                    <div class="interpretation-block">
+                        <h5>Statistical Interpretation</h5>
+                        <p id="res-sens-interpretation-text">—</p>
+                    </div>
+
+                    <div class="assumptions-block">
+                        <h5>Identification Assumptions &amp; Methodological Limitations</h5>
+                        <p id="res-sens-assumptions-text">—</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 8: Available Causal Analysis Methods -->
         <section class="section-card" aria-labelledby="methods-heading">
             <div class="section-header">
-                <h3 id="methods-heading">7. Available Causal Analysis Methods</h3>
+                <h3 id="methods-heading">8. Available Causal Analysis Methods</h3>
                 <p>Six estimators designed for experimental and observational causal inference with explicit identification assumptions.</p>
             </div>
 

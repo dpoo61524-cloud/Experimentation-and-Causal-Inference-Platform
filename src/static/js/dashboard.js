@@ -251,6 +251,53 @@ document.addEventListener('DOMContentLoaded', function () {
     const resDidInterpretationText = document.getElementById('res-did-interpretation-text');
     const resDidAssumptionsText = document.getElementById('res-did-assumptions-text');
 
+    // Section 7: Causal Sensitivity Analysis Elements
+    const sensStatusBanner = document.getElementById('sens-status-banner');
+    const sensUnloadedNotice = document.getElementById('sens-unloaded-notice');
+    const sensFormContainer = document.getElementById('sens-form-container');
+    const sensDatasetName = document.getElementById('sens-dataset-name');
+    const sensDatasetId = document.getElementById('sens-dataset-id');
+    const sensDatasetRows = document.getElementById('sens-dataset-rows');
+    const sensDatasetCols = document.getElementById('sens-dataset-cols');
+    const sensModeDataset = document.getElementById('sens-mode-dataset');
+    const sensModeStandalone = document.getElementById('sens-mode-standalone');
+    const sensDatasetFields = document.getElementById('sens-dataset-fields');
+    const sensStandaloneFields = document.getElementById('sens-standalone-fields');
+    const sensTreatmentSelect = document.getElementById('sens-treatment-select');
+    const sensOutcomeSelect = document.getElementById('sens-outcome-select');
+    const sensRefEstimatorSelect = document.getElementById('sens-ref-estimator-select');
+    const sensConfoundersContainer = document.getElementById('sens-confounders-container');
+    const sensTruncationThresholdsInput = document.getElementById('sens-truncation-thresholds-input');
+    const sensObservedEstimateInput = document.getElementById('sens-observed-estimate-input');
+    const sensCiLowerInput = document.getElementById('sens-ci-lower-input');
+    const sensCiUpperInput = document.getElementById('sens-ci-upper-input');
+    const sensBiasesInput = document.getElementById('sens-biases-input');
+    const sensDropMissingCheckbox = document.getElementById('sens-drop-missing-checkbox');
+    const runSensitivityBtn = document.getElementById('run-sensitivity-btn');
+
+    // Section 7: Results Elements
+    const sensResultsPanel = document.getElementById('sens-results-panel');
+    const resSensDatasetName = document.getElementById('res-sens-dataset-name');
+    const resSensTotalRows = document.getElementById('res-sens-total-rows');
+    const resSensRefEstimatorName = document.getElementById('res-sens-ref-estimator-name');
+    const resSensBaselineVal = document.getElementById('res-sens-baseline-val');
+    const resSensRefKpi = document.getElementById('res-sens-ref-kpi');
+    const resSensRefSub = document.getElementById('res-sens-ref-sub');
+    const resSensSpreadVal = document.getElementById('res-sens-spread-val');
+    const resSensSpreadSub = document.getElementById('res-sens-spread-sub');
+    const resSensScenariosCnt = document.getElementById('res-sens-scenarios-cnt');
+    const resSensZeroCrossings = document.getElementById('res-sens-zero-crossings');
+    const sensEstimatorContainer = document.getElementById('sens-estimator-container');
+    const sensEstimatorTbody = document.getElementById('sens-estimator-tbody');
+    const sensTruncationContainer = document.getElementById('sens-truncation-container');
+    const sensTruncationTbody = document.getElementById('sens-truncation-tbody');
+    const sensScenariosContainer = document.getElementById('sens-scenarios-container');
+    const sensScenariosTbody = document.getElementById('sens-scenarios-tbody');
+    const sensWarningsCard = document.getElementById('sens-warnings-card');
+    const sensWarningsList = document.getElementById('sens-warnings-list');
+    const resSensInterpretationText = document.getElementById('res-sens-interpretation-text');
+    const resSensAssumptionsText = document.getElementById('res-sens-assumptions-text');
+
     // Active session dataset metadata
     let currentDataset = null;
 
@@ -501,6 +548,7 @@ document.addEventListener('DOMContentLoaded', function () {
         setupPsAnalysis(data);
         setupIptwAnalysis(data);
         setupDidAnalysis(data);
+        setupSensAnalysis(data);
     }
 
     // --- 6. Causal Analysis (Unadjusted ATE) Logic ---
@@ -2219,6 +2267,735 @@ document.addEventListener('DOMContentLoaded', function () {
         }
         if (resDidAssumptionsText) {
             resDidAssumptionsText.textContent = r.assumptions || 'No identification assumptions documented.';
+        }
+    }
+
+    // --- 11. Causal Sensitivity Analysis & Robustness Checks Logic ---
+    function showSensStatus(message, type) {
+        if (!sensStatusBanner) return;
+        sensStatusBanner.className = 'status-indicator status-visible status-' + type;
+        sensStatusBanner.textContent = message;
+    }
+
+    function clearSensStatus() {
+        if (!sensStatusBanner) return;
+        sensStatusBanner.className = 'status-indicator';
+        sensStatusBanner.textContent = '';
+    }
+
+    function parseNumberList(str) {
+        if (!str || typeof str !== 'string') return null;
+        const parts = str.split(',').map(function (s) { return s.trim(); }).filter(function (s) { return s.length > 0; });
+        if (parts.length === 0) return null;
+        const nums = [];
+        for (let i = 0; i < parts.length; i++) {
+            const n = parseFloat(parts[i]);
+            if (isNaN(n)) return null;
+            nums.push(n);
+        }
+        return nums;
+    }
+
+    function setupSensAnalysis(data) {
+        if (!data || !data.columns) return;
+        if (sensUnloadedNotice) sensUnloadedNotice.style.display = 'none';
+        if (sensFormContainer) sensFormContainer.style.display = 'block';
+        if (sensResultsPanel) sensResultsPanel.style.display = 'none';
+        clearSensStatus();
+
+        if (sensDatasetName) sensDatasetName.textContent = data.filename + (data.is_benchmark ? ' [Benchmark]' : '');
+        if (sensDatasetId) sensDatasetId.textContent = data.dataset_id;
+        if (sensDatasetRows) sensDatasetRows.textContent = formatNumber(data.row_count);
+        if (sensDatasetCols) sensDatasetCols.textContent = formatNumber(data.column_count);
+
+        // 1. Populate Treatment Select
+        if (sensTreatmentSelect) {
+            sensTreatmentSelect.innerHTML = '<option value="">-- Choose treatment column --</option>';
+            let defaultTreatment = '';
+            data.columns.forEach(function (col) {
+                const optT = document.createElement('option');
+                optT.value = col.name;
+                optT.textContent = col.name + ' (' + col.inferred_type + ')';
+                sensTreatmentSelect.appendChild(optT);
+
+                const nameLower = col.name.toLowerCase();
+                if (!defaultTreatment && (col.inferred_type === 'boolean' || nameLower === 'treatment' || nameLower === 'mens')) {
+                    defaultTreatment = col.name;
+                }
+            });
+            if (defaultTreatment) sensTreatmentSelect.value = defaultTreatment;
+        }
+
+        // 2. Populate Outcome Select
+        if (sensOutcomeSelect) {
+            sensOutcomeSelect.innerHTML = '<option value="">-- Choose outcome column --</option>';
+            let defaultOutcome = '';
+            data.columns.forEach(function (col) {
+                const optO = document.createElement('option');
+                optO.value = col.name;
+                optO.textContent = col.name + ' (' + col.inferred_type + ')';
+                sensOutcomeSelect.appendChild(optO);
+
+                const nameLower = col.name.toLowerCase();
+                if (!defaultOutcome && (col.inferred_type === 'continuous' || col.inferred_type === 'integer') &&
+                    (nameLower === 'spend' || nameLower === 'outcome' || nameLower === 'y' || nameLower === 'conversion')) {
+                    defaultOutcome = col.name;
+                }
+            });
+            if (defaultOutcome) sensOutcomeSelect.value = defaultOutcome;
+        }
+
+        // 3. Populate Confounders Checkboxes
+        if (sensConfoundersContainer) {
+            sensConfoundersContainer.innerHTML = '';
+            data.columns.forEach(function (col) {
+                const label = document.createElement('label');
+                label.className = 'confounder-checkbox-item';
+                label.setAttribute('data-col', col.name);
+
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.name = 'sens-confounder';
+                checkbox.value = col.name;
+
+                // Hillstrom defaults
+                const nameLower = col.name.toLowerCase();
+                if (data.is_benchmark && (nameLower === 'recency' || nameLower === 'history')) {
+                    checkbox.checked = true;
+                }
+
+                checkbox.addEventListener('change', function () {
+                    validateSensForm();
+                });
+
+                const spanName = document.createElement('span');
+                spanName.textContent = col.name;
+
+                const spanType = document.createElement('span');
+                spanType.className = 'col-type-tag';
+                spanType.textContent = col.inferred_type;
+
+                label.appendChild(checkbox);
+                label.appendChild(spanName);
+                label.appendChild(spanType);
+
+                sensConfoundersContainer.appendChild(label);
+            });
+        }
+
+        // Mode reset
+        if (sensModeDataset) sensModeDataset.checked = true;
+        if (sensModeStandalone) sensModeStandalone.checked = false;
+        if (sensDatasetFields) sensDatasetFields.style.display = 'block';
+        if (sensStandaloneFields) sensStandaloneFields.style.display = 'none';
+
+        // Defaults
+        if (sensRefEstimatorSelect) sensRefEstimatorSelect.value = 'regression_adjusted';
+        if (sensTruncationThresholdsInput) sensTruncationThresholdsInput.value = '10.0, 5.0, 3.0';
+        if (sensBiasesInput) sensBiasesInput.value = '-2.0, -1.0, 0.0, 1.0, 2.0';
+        if (sensObservedEstimateInput) sensObservedEstimateInput.value = '';
+        if (sensCiLowerInput) sensCiLowerInput.value = '';
+        if (sensCiUpperInput) sensCiUpperInput.value = '';
+        if (sensDropMissingCheckbox) sensDropMissingCheckbox.checked = false;
+
+        updateSensConfoundersAvailability();
+        validateSensForm();
+    }
+
+    function updateSensConfoundersAvailability() {
+        if (!sensConfoundersContainer) return;
+        const tCol = sensTreatmentSelect ? sensTreatmentSelect.value : '';
+        const oCol = sensOutcomeSelect ? sensOutcomeSelect.value : '';
+
+        const items = sensConfoundersContainer.querySelectorAll('.confounder-checkbox-item');
+        items.forEach(function (item) {
+            const col = item.getAttribute('data-col');
+            const checkbox = item.querySelector('input[type="checkbox"]');
+            if (!checkbox) return;
+
+            if (col && (col === tCol || col === oCol)) {
+                checkbox.checked = false;
+                checkbox.disabled = true;
+                item.classList.add('disabled');
+            } else {
+                checkbox.disabled = false;
+                item.classList.remove('disabled');
+            }
+        });
+    }
+
+    function getSelectedSensConfounders() {
+        if (!sensConfoundersContainer) return [];
+        const checkboxes = sensConfoundersContainer.querySelectorAll('input[name="sens-confounder"]:checked');
+        const selected = [];
+        checkboxes.forEach(function (cb) {
+            if (!cb.disabled && cb.value) {
+                selected.push(cb.value);
+            }
+        });
+        return selected;
+    }
+
+    function validateSensForm() {
+        if (!currentDataset) {
+            if (runSensitivityBtn) runSensitivityBtn.disabled = true;
+            return false;
+        }
+
+        const isDatasetMode = sensModeDataset ? sensModeDataset.checked : true;
+
+        // Common: hypothetical biases validation
+        const biasStr = sensBiasesInput ? sensBiasesInput.value.trim() : '';
+        if (!biasStr) {
+            showSensStatus('Please specify at least one hypothetical bias value (e.g. -2.0, -1.0, 0.0, 1.0, 2.0).', 'error');
+            if (runSensitivityBtn) runSensitivityBtn.disabled = true;
+            return false;
+        }
+        const parsedBiases = parseNumberList(biasStr);
+        if (!parsedBiases || parsedBiases.length === 0) {
+            showSensStatus('Hypothetical biases must be comma-separated numeric values.', 'error');
+            if (runSensitivityBtn) runSensitivityBtn.disabled = true;
+            return false;
+        }
+
+        if (isDatasetMode) {
+            const tCol = sensTreatmentSelect ? sensTreatmentSelect.value : '';
+            const oCol = sensOutcomeSelect ? sensOutcomeSelect.value : '';
+
+            if (!tCol || !oCol) {
+                clearSensStatus();
+                if (runSensitivityBtn) runSensitivityBtn.disabled = true;
+                return false;
+            }
+
+            if (tCol === oCol) {
+                showSensStatus('Treatment and Outcome cannot be the same column ("' + tCol + '").', 'error');
+                if (runSensitivityBtn) runSensitivityBtn.disabled = true;
+                return false;
+            }
+
+            // Truncation thresholds validation (optional)
+            const truncStr = sensTruncationThresholdsInput ? sensTruncationThresholdsInput.value.trim() : '';
+            if (truncStr) {
+                const parsedTrunc = parseNumberList(truncStr);
+                if (!parsedTrunc || parsedTrunc.length === 0) {
+                    showSensStatus('IPTW truncation thresholds must be comma-separated positive numbers.', 'error');
+                    if (runSensitivityBtn) runSensitivityBtn.disabled = true;
+                    return false;
+                }
+                for (let i = 0; i < parsedTrunc.length; i++) {
+                    if (parsedTrunc[i] <= 0) {
+                        showSensStatus('IPTW truncation threshold (' + parsedTrunc[i] + ') must be strictly positive (> 0).', 'error');
+                        if (runSensitivityBtn) runSensitivityBtn.disabled = true;
+                        return false;
+                    }
+                }
+            }
+        } else {
+            // Standalone mode
+            const obsStr = sensObservedEstimateInput ? sensObservedEstimateInput.value.trim() : '';
+            if (!obsStr || isNaN(parseFloat(obsStr))) {
+                clearSensStatus();
+                if (runSensitivityBtn) runSensitivityBtn.disabled = true;
+                return false;
+            }
+
+            // Check optional CI
+            const ciLStr = sensCiLowerInput ? sensCiLowerInput.value.trim() : '';
+            const ciUStr = sensCiUpperInput ? sensCiUpperInput.value.trim() : '';
+            if (ciLStr || ciUStr) {
+                if (!ciLStr || !ciUStr) {
+                    showSensStatus('Both 95% CI lower and upper bounds must be entered, or leave both empty.', 'error');
+                    if (runSensitivityBtn) runSensitivityBtn.disabled = true;
+                    return false;
+                }
+                const lVal = parseFloat(ciLStr);
+                const uVal = parseFloat(ciUStr);
+                if (isNaN(lVal) || isNaN(uVal)) {
+                    showSensStatus('95% CI bounds must be valid numbers.', 'error');
+                    if (runSensitivityBtn) runSensitivityBtn.disabled = true;
+                    return false;
+                }
+                if (lVal > uVal) {
+                    showSensStatus('95% CI lower bound (' + lVal + ') cannot exceed upper bound (' + uVal + ').', 'error');
+                    if (runSensitivityBtn) runSensitivityBtn.disabled = true;
+                    return false;
+                }
+            }
+        }
+
+        clearSensStatus();
+        if (runSensitivityBtn) runSensitivityBtn.disabled = false;
+        return true;
+    }
+
+    if (sensModeDataset) {
+        sensModeDataset.addEventListener('change', function () {
+            if (this.checked) {
+                if (sensDatasetFields) sensDatasetFields.style.display = 'block';
+                if (sensStandaloneFields) sensStandaloneFields.style.display = 'none';
+                validateSensForm();
+            }
+        });
+    }
+
+    if (sensModeStandalone) {
+        sensModeStandalone.addEventListener('change', function () {
+            if (this.checked) {
+                if (sensDatasetFields) sensDatasetFields.style.display = 'none';
+                if (sensStandaloneFields) sensStandaloneFields.style.display = 'block';
+                validateSensForm();
+            }
+        });
+    }
+
+    if (sensTreatmentSelect) {
+        sensTreatmentSelect.addEventListener('change', function () {
+            updateSensConfoundersAvailability();
+            validateSensForm();
+        });
+    }
+
+    if (sensOutcomeSelect) {
+        sensOutcomeSelect.addEventListener('change', function () {
+            updateSensConfoundersAvailability();
+            validateSensForm();
+        });
+    }
+
+    if (sensRefEstimatorSelect) sensRefEstimatorSelect.addEventListener('change', validateSensForm);
+    if (sensTruncationThresholdsInput) sensTruncationThresholdsInput.addEventListener('input', validateSensForm);
+    if (sensBiasesInput) sensBiasesInput.addEventListener('input', validateSensForm);
+    if (sensObservedEstimateInput) sensObservedEstimateInput.addEventListener('input', validateSensForm);
+    if (sensCiLowerInput) sensCiLowerInput.addEventListener('input', validateSensForm);
+    if (sensCiUpperInput) sensCiUpperInput.addEventListener('input', validateSensForm);
+
+    if (runSensitivityBtn) {
+        runSensitivityBtn.addEventListener('click', function (e) {
+            e.preventDefault();
+            if (!validateSensForm()) return;
+            if (!currentDataset) {
+                showSensStatus('Please select or upload a dataset first.', 'error');
+                return;
+            }
+
+            const isDatasetMode = sensModeDataset ? sensModeDataset.checked : true;
+            const biasStr = sensBiasesInput ? sensBiasesInput.value.trim() : '';
+            const biases = parseNumberList(biasStr) || [0.0];
+
+            const payload = {
+                bias_values: biases,
+                hypothetical_biases: biases,
+            };
+
+            if (isDatasetMode) {
+                payload.treatment_col = sensTreatmentSelect.value;
+                payload.outcome_col = sensOutcomeSelect.value;
+                payload.confounder_cols = getSelectedSensConfounders();
+                payload.reference_estimator = sensRefEstimatorSelect ? sensRefEstimatorSelect.value : 'regression_adjusted';
+                payload.drop_missing = sensDropMissingCheckbox ? sensDropMissingCheckbox.checked : false;
+
+                const truncStr = sensTruncationThresholdsInput ? sensTruncationThresholdsInput.value.trim() : '';
+                if (truncStr) {
+                    const parsedTrunc = parseNumberList(truncStr);
+                    if (parsedTrunc && parsedTrunc.length > 0) {
+                        payload.truncation_thresholds = parsedTrunc;
+                    }
+                }
+            } else {
+                payload.observed_estimate = parseFloat(sensObservedEstimateInput.value);
+                const ciLStr = sensCiLowerInput ? sensCiLowerInput.value.trim() : '';
+                const ciUStr = sensCiUpperInput ? sensCiUpperInput.value.trim() : '';
+                if (ciLStr && ciUStr) {
+                    payload.confidence_interval = [parseFloat(ciLStr), parseFloat(ciUStr)];
+                }
+            }
+
+            runSensitivityBtn.disabled = true;
+            if (sensResultsPanel) sensResultsPanel.style.display = 'none';
+            showSensStatus('Executing causal sensitivity analysis and robustness checks... Please wait.', 'info');
+
+            fetch('/api/dataset/' + encodeURIComponent(currentDataset.dataset_id) + '/causal/sensitivity-analysis', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                },
+                body: JSON.stringify(payload),
+            })
+                .then(function (res) {
+                    if (!res.ok) {
+                        return res.json().then(function (err) {
+                            throw new Error(err.detail || 'Sensitivity analysis request failed with HTTP ' + res.status);
+                        });
+                    }
+                    return res.json();
+                })
+                .then(function (results) {
+                    renderSensResults(results);
+                    const scCount = results.bias_scenarios ? results.bias_scenarios.length : 0;
+                    showSensStatus('Causal sensitivity analysis complete: evaluated ' + scCount + ' bias scenario(s) for ' + results.dataset_filename + '.', 'success');
+                })
+                .catch(function (err) {
+                    showSensStatus('Sensitivity Analysis Error: ' + err.message, 'error');
+                })
+                .finally(function () {
+                    runSensitivityBtn.disabled = false;
+                });
+        });
+    }
+
+    function renderSensResults(r) {
+        if (!r) return;
+        if (sensResultsPanel) sensResultsPanel.style.display = 'block';
+
+        if (resSensDatasetName) resSensDatasetName.textContent = r.dataset_filename || '—';
+        if (resSensTotalRows) resSensTotalRows.textContent = formatNumber(r.total_dataset_rows);
+        if (resSensRefEstimatorName) resSensRefEstimatorName.textContent = r.reference_estimator || 'Manual / Observed Estimate';
+
+        const baselineEst = (r.reference_estimate !== null && r.reference_estimate !== undefined) ? r.reference_estimate : r.observed_estimate;
+        if (resSensBaselineVal) {
+            if (baselineEst !== null && baselineEst !== undefined) {
+                const pfx = baselineEst > 0 ? '+' : '';
+                resSensBaselineVal.textContent = pfx + Number(baselineEst).toFixed(4);
+            } else {
+                resSensBaselineVal.textContent = '—';
+            }
+        }
+
+        // Primary KPIs
+        if (resSensRefKpi) {
+            if (baselineEst !== null && baselineEst !== undefined) {
+                const pfx = baselineEst > 0 ? '+' : '';
+                resSensRefKpi.textContent = pfx + Number(baselineEst).toFixed(4);
+            } else {
+                resSensRefKpi.textContent = '—';
+            }
+        }
+        if (resSensRefSub) {
+            resSensRefSub.textContent = r.reference_estimator ? ('Estimator: ' + r.reference_estimator) : 'Precomputed estimate';
+        }
+
+        // Multi-Estimator Spread
+        const comparisons = r.estimator_comparisons || {};
+        const compKeys = Object.keys(comparisons);
+        const estValues = [];
+        compKeys.forEach(function (k) {
+            const item = comparisons[k];
+            if (item && item.available && item.estimate !== null && item.estimate !== undefined) {
+                estValues.push(Number(item.estimate));
+            }
+        });
+
+        if (resSensSpreadVal) {
+            if (estValues.length >= 2) {
+                const spread = Math.max.apply(null, estValues) - Math.min.apply(null, estValues);
+                resSensSpreadVal.textContent = Number(spread).toFixed(4);
+            } else {
+                resSensSpreadVal.textContent = 'N/A';
+            }
+        }
+        if (resSensSpreadSub) {
+            resSensSpreadSub.textContent = estValues.length >= 2 ? ('Spread across ' + estValues.length + ' estimators') : 'Single estimator';
+        }
+
+        // Evaluated Bias Scenarios
+        const scenarios = r.bias_scenarios || (r.unmeasured_confounding_analysis && r.unmeasured_confounding_analysis.bias_scenarios) || [];
+        if (resSensScenariosCnt) {
+            resSensScenariosCnt.textContent = formatNumber(scenarios.length);
+        }
+
+        // Zero Crossing Coverage
+        let zeroCrossingCount = 0;
+        let hasAnyCi = false;
+        scenarios.forEach(function (s) {
+            if (s.interval_includes_zero !== null && s.interval_includes_zero !== undefined) {
+                hasAnyCi = true;
+                if (s.interval_includes_zero === true) zeroCrossingCount++;
+            }
+        });
+
+        if (resSensZeroCrossings) {
+            if (hasAnyCi) {
+                resSensZeroCrossings.textContent = zeroCrossingCount + ' of ' + scenarios.length;
+            } else {
+                resSensZeroCrossings.textContent = 'N/A (No CI)';
+            }
+        }
+
+        // 1. Multi-Estimator Table
+        if (compKeys.length > 0) {
+            if (sensEstimatorContainer) sensEstimatorContainer.style.display = 'block';
+            if (sensEstimatorTbody) {
+                sensEstimatorTbody.innerHTML = '';
+                compKeys.forEach(function (k) {
+                    const item = comparisons[k];
+                    if (!item) return;
+
+                    const tr = document.createElement('tr');
+
+                    // Name
+                    const tdName = document.createElement('td');
+                    tdName.style.fontWeight = '600';
+                    tdName.textContent = item.name || k;
+                    tr.appendChild(tdName);
+
+                    // Status
+                    const tdStatus = document.createElement('td');
+                    const spanStatus = document.createElement('span');
+                    if (item.available) {
+                        spanStatus.className = 'type-badge type-boolean';
+                        spanStatus.textContent = 'Estimated';
+                    } else {
+                        spanStatus.className = 'type-badge type-string';
+                        spanStatus.style.backgroundColor = '#FEE2E2';
+                        spanStatus.style.color = '#B91C1C';
+                        spanStatus.textContent = 'Unavailable';
+                        if (item.reason) spanStatus.title = item.reason;
+                    }
+                    tdStatus.appendChild(spanStatus);
+                    tr.appendChild(tdStatus);
+
+                    // Point estimate
+                    const tdEst = document.createElement('td');
+                    tdEst.style.textAlign = 'right';
+                    tdEst.style.fontFamily = 'var(--font-mono)';
+                    if (item.available && item.estimate !== null && item.estimate !== undefined) {
+                        const pfx = item.estimate > 0 ? '+' : '';
+                        tdEst.textContent = pfx + Number(item.estimate).toFixed(4);
+                    } else {
+                        tdEst.textContent = '—';
+                    }
+                    tr.appendChild(tdEst);
+
+                    // Diff from reference
+                    const tdDiff = document.createElement('td');
+                    tdDiff.style.textAlign = 'right';
+                    tdDiff.style.fontFamily = 'var(--font-mono)';
+                    if (item.available && item.difference_from_reference !== null && item.difference_from_reference !== undefined) {
+                        const diffVal = Number(item.difference_from_reference);
+                        const pfx = diffVal > 0 ? '+' : '';
+                        const refTag = Math.abs(diffVal) < 1e-6 ? ' (Ref)' : '';
+                        tdDiff.textContent = pfx + diffVal.toFixed(4) + refTag;
+                    } else {
+                        tdDiff.textContent = '—';
+                    }
+                    tr.appendChild(tdDiff);
+
+                    // 95% CI
+                    const tdCi = document.createElement('td');
+                    tdCi.style.textAlign = 'right';
+                    tdCi.style.fontFamily = 'var(--font-mono)';
+                    if (item.confidence_interval && Array.isArray(item.confidence_interval)) {
+                        tdCi.textContent = '[' + Number(item.confidence_interval[0]).toFixed(4) + ', ' + Number(item.confidence_interval[1]).toFixed(4) + ']';
+                    } else {
+                        tdCi.textContent = '—';
+                    }
+                    tr.appendChild(tdCi);
+
+                    sensEstimatorTbody.appendChild(tr);
+                });
+            }
+        } else {
+            if (sensEstimatorContainer) sensEstimatorContainer.style.display = 'none';
+        }
+
+        // 2. IPTW Truncation Table
+        const truncAnalysis = r.iptw_truncation_analysis;
+        if (truncAnalysis && truncAnalysis.scenarios && truncAnalysis.scenarios.length > 0) {
+            if (sensTruncationContainer) sensTruncationContainer.style.display = 'block';
+            if (sensTruncationTbody) {
+                sensTruncationTbody.innerHTML = '';
+
+                // Add untruncated baseline row if available
+                if (truncAnalysis.untruncated_estimate !== null && truncAnalysis.untruncated_estimate !== undefined) {
+                    const trBase = document.createElement('tr');
+                    trBase.style.backgroundColor = 'var(--warm-neutral-bg)';
+
+                    const tdThresh = document.createElement('td');
+                    tdThresh.style.textAlign = 'right';
+                    tdThresh.style.fontWeight = '600';
+                    tdThresh.textContent = 'Untruncated (None)';
+                    trBase.appendChild(tdThresh);
+
+                    const tdEst = document.createElement('td');
+                    tdEst.style.textAlign = 'right';
+                    tdEst.style.fontFamily = 'var(--font-mono)';
+                    const pfx = truncAnalysis.untruncated_estimate > 0 ? '+' : '';
+                    tdEst.textContent = pfx + Number(truncAnalysis.untruncated_estimate).toFixed(4);
+                    trBase.appendChild(tdEst);
+
+                    const tdDiff = document.createElement('td');
+                    tdDiff.style.textAlign = 'right';
+                    tdDiff.style.fontFamily = 'var(--font-mono)';
+                    tdDiff.textContent = '0.0000 (Base)';
+                    trBase.appendChild(tdDiff);
+
+                    const tdClipped = document.createElement('td');
+                    tdClipped.style.textAlign = 'right';
+                    tdClipped.textContent = '0 (0.00%)';
+                    trBase.appendChild(tdClipped);
+
+                    const tdEss = document.createElement('td');
+                    tdEss.style.textAlign = 'right';
+                    tdEss.textContent = 'Baseline weights';
+                    trBase.appendChild(tdEss);
+
+                    sensTruncationTbody.appendChild(trBase);
+                }
+
+                truncAnalysis.scenarios.forEach(function (sc) {
+                    const tr = document.createElement('tr');
+
+                    // Max weight threshold
+                    const tdThresh = document.createElement('td');
+                    tdThresh.style.textAlign = 'right';
+                    tdThresh.style.fontFamily = 'var(--font-mono)';
+                    const threshVal = sc.threshold !== undefined ? sc.threshold : sc.max_weight;
+                    tdThresh.textContent = '≤ ' + Number(threshVal).toFixed(1);
+                    tr.appendChild(tdThresh);
+
+                    // Truncated estimate
+                    const tdEst = document.createElement('td');
+                    tdEst.style.textAlign = 'right';
+                    tdEst.style.fontFamily = 'var(--font-mono)';
+                    const estVal = sc.estimate !== undefined ? sc.estimate : sc.truncated_estimate;
+                    const pfx = estVal > 0 ? '+' : '';
+                    tdEst.textContent = pfx + Number(estVal).toFixed(4);
+                    tr.appendChild(tdEst);
+
+                    // Diff from untruncated
+                    const tdDiff = document.createElement('td');
+                    tdDiff.style.textAlign = 'right';
+                    tdDiff.style.fontFamily = 'var(--font-mono)';
+                    const diffVal = sc.difference_from_untruncated !== undefined ? sc.difference_from_untruncated : 0;
+                    const dPfx = diffVal > 0 ? '+' : '';
+                    tdDiff.textContent = dPfx + Number(diffVal).toFixed(4);
+                    tr.appendChild(tdDiff);
+
+                    // Weights clipped
+                    const tdClipped = document.createElement('td');
+                    tdClipped.style.textAlign = 'right';
+                    const nTrunc = sc.weights_truncated_count !== undefined ? sc.weights_truncated_count : (sc.rows_truncated || 0);
+                    tdClipped.textContent = formatNumber(nTrunc);
+                    tr.appendChild(tdClipped);
+
+                    // Kish ESS
+                    const tdEss = document.createElement('td');
+                    tdEss.style.textAlign = 'right';
+                    tdEss.textContent = Number(sc.ess_total || 0).toFixed(1) + ' (T: ' + Number(sc.ess_treated || 0).toFixed(1) + ', C: ' + Number(sc.ess_control || 0).toFixed(1) + ')';
+                    tr.appendChild(tdEss);
+
+                    sensTruncationTbody.appendChild(tr);
+                });
+            }
+        } else {
+            if (sensTruncationContainer) sensTruncationContainer.style.display = 'none';
+        }
+
+        // 3. Hypothetical Bias Scenarios Table
+        if (scenarios.length > 0) {
+            if (sensScenariosContainer) sensScenariosContainer.style.display = 'block';
+            if (sensScenariosTbody) {
+                sensScenariosTbody.innerHTML = '';
+                scenarios.forEach(function (sc) {
+                    const tr = document.createElement('tr');
+
+                    const biasVal = sc.hypothetical_bias !== undefined ? sc.hypothetical_bias : sc.bias;
+                    const adjEst = sc.adjusted_estimate;
+                    const adjCi = sc.adjusted_confidence_interval;
+                    const incZero = sc.interval_includes_zero;
+
+                    // 1. Bias
+                    const tdBias = document.createElement('td');
+                    tdBias.style.textAlign = 'right';
+                    tdBias.style.fontFamily = 'var(--font-mono)';
+                    tdBias.style.fontWeight = '600';
+                    const bPfx = biasVal > 0 ? '+' : '';
+                    tdBias.textContent = bPfx + Number(biasVal).toFixed(4);
+                    tr.appendChild(tdBias);
+
+                    // 2. Adjusted Estimate
+                    const tdAdj = document.createElement('td');
+                    tdAdj.style.textAlign = 'right';
+                    tdAdj.style.fontFamily = 'var(--font-mono)';
+                    const aPfx = adjEst > 0 ? '+' : '';
+                    tdAdj.textContent = aPfx + Number(adjEst).toFixed(4);
+                    tr.appendChild(tdAdj);
+
+                    // 3. Adjusted 95% CI
+                    const tdCi = document.createElement('td');
+                    tdCi.style.textAlign = 'right';
+                    tdCi.style.fontFamily = 'var(--font-mono)';
+                    if (adjCi && Array.isArray(adjCi)) {
+                        tdCi.textContent = '[' + Number(adjCi[0]).toFixed(4) + ', ' + Number(adjCi[1]).toFixed(4) + ']';
+                    } else {
+                        tdCi.textContent = '—';
+                    }
+                    tr.appendChild(tdCi);
+
+                    // 4. Spans Zero?
+                    const tdZero = document.createElement('td');
+                    const spanZero = document.createElement('span');
+                    if (incZero === true) {
+                        spanZero.className = 'type-badge';
+                        spanZero.style.backgroundColor = '#FEF3C7';
+                        spanZero.style.color = '#92400E';
+                        spanZero.style.fontWeight = '600';
+                        spanZero.textContent = 'Spans 0 (Inconclusive)';
+                    } else if (incZero === false) {
+                        spanZero.className = 'type-badge type-boolean';
+                        spanZero.textContent = 'Does Not Span 0 (Robust)';
+                    } else {
+                        spanZero.className = 'type-badge type-unknown';
+                        spanZero.textContent = 'No CI';
+                    }
+                    tdZero.appendChild(spanZero);
+                    tr.appendChild(tdZero);
+
+                    // 5. Interpretation Note
+                    const tdNote = document.createElement('td');
+                    tdNote.style.fontSize = '12px';
+                    if (Math.abs(biasVal) < 1e-6) {
+                        tdNote.textContent = 'Baseline observed effect (zero hypothetical confounding)';
+                    } else if (incZero === true) {
+                        tdNote.textContent = 'Qualitative effect nullified or sign reversed under this degree of confounding';
+                        tdNote.style.color = '#B45309';
+                    } else if (biasVal > 0) {
+                        tdNote.textContent = 'Assumes confounding inflated effect (+b); adjusted estimate decreases';
+                    } else {
+                        tdNote.textContent = 'Assumes confounding suppressed effect (-b); adjusted estimate increases';
+                    }
+                    tr.appendChild(tdNote);
+
+                    sensScenariosTbody.appendChild(tr);
+                });
+            }
+        } else {
+            if (sensScenariosContainer) sensScenariosContainer.style.display = 'none';
+        }
+
+        // Warnings Card
+        if (sensWarningsCard && sensWarningsList) {
+            sensWarningsList.innerHTML = '';
+            if (r.warnings && r.warnings.length > 0) {
+                r.warnings.forEach(function (warnMsg) {
+                    const li = document.createElement('li');
+                    li.textContent = warnMsg;
+                    sensWarningsList.appendChild(li);
+                });
+                sensWarningsCard.style.display = 'block';
+            } else {
+                sensWarningsCard.style.display = 'none';
+            }
+        }
+
+        // Narrative & Assumptions
+        if (resSensInterpretationText) {
+            resSensInterpretationText.textContent = r.interpretation || 'No interpretation provided.';
+        }
+        if (resSensAssumptionsText) {
+            resSensAssumptionsText.textContent = r.assumptions || 'No identification assumptions documented.';
         }
     }
 });

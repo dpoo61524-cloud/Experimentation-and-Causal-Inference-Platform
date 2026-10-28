@@ -3469,6 +3469,382 @@ async def causal_sensitivity_analysis_endpoint(
         )
 
 
+class DatasetCausalSensitivityAnalysisRequest(BaseModel):
+    treatment_col: Optional[str] = Field(
+        None,
+        description="Name of the binary treatment assignment column in the dataset (required for dataset evaluation mode).",
+        examples=["treatment"],
+    )
+    outcome_col: Optional[str] = Field(
+        None,
+        description="Name of the numeric outcome column in the dataset (required for dataset evaluation mode).",
+        examples=["outcome"],
+    )
+    confounder_cols: Optional[List[str]] = Field(
+        None,
+        description="Optional list of observed confounder column names for regression adjustment and IPTW.",
+        examples=[["age"]],
+    )
+    treated_value: Optional[Any] = Field(
+        None,
+        description="Label identifying the treated group. Inferred automatically if omitted.",
+        examples=[1],
+    )
+    control_value: Optional[Any] = Field(
+        None,
+        description="Label identifying the control group. Inferred automatically if omitted.",
+        examples=[0],
+    )
+    untreated_value: Optional[Any] = Field(
+        None,
+        description="Alias for control_value.",
+        examples=[0],
+    )
+    drop_missing: bool = Field(
+        default=False,
+        description="Whether to drop rows with missing values in required analysis columns. Default is False.",
+        examples=[False],
+    )
+    reference_estimator: Optional[str] = Field(
+        default="regression_adjusted",
+        description="Primary reference estimator ('regression_adjusted', 'iptw', or 'unadjusted').",
+        examples=["regression_adjusted"],
+    )
+    truncation_thresholds: Optional[List[float]] = Field(
+        None,
+        description="Optional sequence of strictly positive upper weight bounds for IPTW truncation sensitivity checks.",
+        examples=[[10.0, 5.0, 3.0]],
+    )
+    hypothetical_biases: Optional[Union[float, List[float]]] = Field(
+        None,
+        description="Optional hypothetical signed bias values (b) for unmeasured confounding sensitivity scenarios: tau_adjusted = tau_observed - b.",
+        examples=[[1.0, 2.0, -1.0]],
+    )
+    bias_values: Optional[Union[float, List[float]]] = Field(
+        None,
+        description="Alias for hypothetical_biases, or required bias values in standalone observed-estimate mode.",
+        examples=[[1.0, 2.0, -1.0]],
+    )
+    observed_estimate: Optional[float] = Field(
+        None,
+        description="Observed effect estimate for standalone unmeasured confounding sensitivity analysis (used when treatment_col/outcome_col are omitted).",
+        examples=[5.0],
+    )
+    confidence_interval: Optional[List[float]] = Field(
+        None,
+        description="Optional two-element confidence interval [lower, upper] for the observed estimate in standalone mode.",
+        examples=[[3.0, 7.0]],
+    )
+
+    @field_validator("treatment_col", "outcome_col")
+    @classmethod
+    def validate_column_name(cls, v: Any, info: Any) -> Optional[str]:
+        if v is None:
+            return None
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError(f"{info.field_name} must be a non-empty string when provided.")
+        return v.strip()
+
+    @field_validator("confounder_cols")
+    @classmethod
+    def validate_confounder_names(cls, v: Any) -> Optional[List[str]]:
+        if v is None:
+            return None
+        if not isinstance(v, (list, tuple)):
+            raise ValueError("confounder_cols must be a list of column names.")
+        cleaned = []
+        for idx, col in enumerate(v):
+            if not isinstance(col, str) or not col.strip():
+                raise ValueError(f"confounder_cols element at index {idx} must be a non-empty string.")
+            cleaned.append(col.strip())
+        return cleaned
+
+    @field_validator("truncation_thresholds", mode="before")
+    @classmethod
+    def validate_truncation_thresholds(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        if isinstance(v, bool) or not isinstance(v, (list, tuple)):
+            raise ValueError("truncation_thresholds must be a list of strictly positive numbers.")
+        if len(v) == 0:
+            raise ValueError("truncation_thresholds cannot be empty when provided.")
+        validated = []
+        for idx, thresh in enumerate(v):
+            if thresh is None or isinstance(thresh, bool) or not isinstance(thresh, (int, float)):
+                raise ValueError(f"truncation_thresholds element at index {idx} must be a numeric float or int.")
+            if math.isnan(thresh) or math.isinf(thresh):
+                raise ValueError(f"truncation_thresholds element at index {idx} cannot be NaN or infinite.")
+            if float(thresh) <= 0.0:
+                raise ValueError(f"truncation_thresholds element at index {idx} must be strictly positive, got {thresh}.")
+            validated.append(float(thresh))
+        return validated
+
+    @field_validator("observed_estimate", mode="before")
+    @classmethod
+    def validate_observed_estimate(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        if isinstance(v, bool):
+            raise ValueError("observed_estimate cannot be a boolean.")
+        if not isinstance(v, (int, float)):
+            raise ValueError(f"observed_estimate must be a numeric float or int, got {type(v).__name__}.")
+        if math.isnan(v) or math.isinf(v):
+            raise ValueError("observed_estimate cannot be NaN or infinite.")
+        return float(v)
+
+    @field_validator("hypothetical_biases", "bias_values", mode="before")
+    @classmethod
+    def validate_biases(cls, v: Any, info: Any) -> Any:
+        if v is None:
+            return None
+        if isinstance(v, bool):
+            raise ValueError(f"{info.field_name} cannot be a boolean.")
+        if isinstance(v, (int, float)):
+            if math.isnan(v) or math.isinf(v):
+                raise ValueError(f"{info.field_name} cannot be NaN or infinite.")
+            return float(v)
+        if isinstance(v, (list, tuple)):
+            if len(v) == 0:
+                raise ValueError(f"{info.field_name} cannot be empty when provided.")
+            validated = []
+            for idx, b in enumerate(v):
+                if b is None or isinstance(b, bool) or not isinstance(b, (int, float)):
+                    raise ValueError(f"{info.field_name} element at index {idx} must be a numeric float or int.")
+                if math.isnan(b) or math.isinf(b):
+                    raise ValueError(f"{info.field_name} element at index {idx} cannot be NaN or infinite.")
+                validated.append(float(b))
+            return validated
+        raise ValueError(f"{info.field_name} must be a number or list of numbers.")
+
+    @field_validator("confidence_interval", mode="before")
+    @classmethod
+    def validate_ci(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        if isinstance(v, bool) or not isinstance(v, (list, tuple)):
+            raise ValueError("confidence_interval must be a list of 2 numbers.")
+        if len(v) != 2:
+            raise ValueError(f"confidence_interval must contain exactly 2 elements [lower, upper], got {len(v)}.")
+        for idx, bound in enumerate(v):
+            if bound is None or isinstance(bound, bool) or not isinstance(bound, (int, float)):
+                raise ValueError(f"confidence_interval bound at index {idx} must be a numeric float or int.")
+            if math.isnan(bound) or math.isinf(bound):
+                raise ValueError(f"confidence_interval bound at index {idx} cannot be NaN or infinite.")
+        l_val, u_val = float(v[0]), float(v[1])
+        if l_val > u_val:
+            raise ValueError(f"confidence_interval lower bound ({l_val}) cannot exceed upper bound ({u_val}).")
+        return [l_val, u_val]
+
+    @field_validator("drop_missing")
+    @classmethod
+    def validate_drop_missing(cls, v: Any) -> bool:
+        if not isinstance(v, bool):
+            raise ValueError("drop_missing must be a boolean.")
+        return v
+
+    @model_validator(mode="after")
+    def validate_dataset_sensitivity_request(self) -> "DatasetCausalSensitivityAnalysisRequest":
+        if self.treatment_col or self.outcome_col:
+            if not self.treatment_col:
+                raise ValueError("treatment_col must be provided as a non-empty string when outcome_col is provided.")
+            if not self.outcome_col:
+                raise ValueError("outcome_col must be provided as a non-empty string when treatment_col is provided.")
+            if self.treatment_col == self.outcome_col:
+                raise ValueError(f"treatment_col and outcome_col cannot be the same column ('{self.treatment_col}').")
+            if self.confounder_cols:
+                if self.treatment_col in self.confounder_cols:
+                    raise ValueError(f"treatment_col ('{self.treatment_col}') cannot also appear in confounder_cols.")
+                if self.outcome_col in self.confounder_cols:
+                    raise ValueError(f"outcome_col ('{self.outcome_col}') cannot also appear in confounder_cols.")
+                if len(self.confounder_cols) != len(set(self.confounder_cols)):
+                    raise ValueError(f"confounder_cols contains duplicate column names: {self.confounder_cols}.")
+            if self.reference_estimator:
+                norm_ref = self.reference_estimator.lower().strip()
+                valid_refs = {"regression_adjusted", "iptw", "unadjusted"}
+                if norm_ref not in valid_refs:
+                    raise ValueError(
+                        f"Unsupported reference_estimator: {self.reference_estimator!r}. "
+                        f"Expected one of: {sorted(list(valid_refs))}."
+                    )
+                self.reference_estimator = norm_ref
+            actual_ctrl = self.control_value if self.control_value is not None else self.untreated_value
+            if self.treated_value is not None and actual_ctrl is not None and self.treated_value == actual_ctrl:
+                raise ValueError("treated_value and control_value cannot be identical.")
+        else:
+            if self.observed_estimate is None:
+                raise ValueError(
+                    "Either ('treatment_col' and 'outcome_col') for dataset analysis or ('observed_estimate' and 'bias_values'/'hypothetical_biases') for standalone sensitivity analysis must be provided."
+                )
+            resolved_biases = self.hypothetical_biases if self.hypothetical_biases is not None else self.bias_values
+            if resolved_biases is None:
+                raise ValueError(
+                    "bias_values (or hypothetical_biases) must be provided when analyzing unmeasured confounding for an observed estimate."
+                )
+        return self
+
+
+class DatasetCausalSensitivityAnalysisResponse(CausalSensitivityAnalysisResponse):
+    dataset_id: str = Field(..., description="Unique opaque dataset identifier")
+    dataset_filename: str = Field(..., description="Original filename of the stored dataset evaluated")
+    total_dataset_rows: int = Field(..., description="Total rows in the stored dataset")
+
+
+@app.post(
+    "/api/dataset/{dataset_id}/causal/sensitivity-analysis",
+    response_model=DatasetCausalSensitivityAnalysisResponse,
+    tags=["Causal Inference", "Datasets"],
+    summary="Conduct causal sensitivity analysis for a stored dataset",
+)
+async def dataset_causal_sensitivity_analysis_endpoint(
+    dataset_id: str,
+    payload: DatasetCausalSensitivityAnalysisRequest,
+) -> Dict[str, Any]:
+    """Perform causal sensitivity analysis and robustness checks for a stored dataset.
+
+    Supports two evaluation modes:
+    1. Dataset Mode: When treatment_col and outcome_col are specified, loads the required columns
+       from disk, evaluates multi-estimator consistency (unadjusted, regression adjustment, IPTW),
+       tests IPTW weight truncation stability across thresholds, and evaluates unmeasured confounding
+       hypothetical bias scenarios.
+    2. Observed Estimate Mode: When treatment_col is omitted and observed_estimate is provided,
+       evaluates unmeasured confounding hypothetical bias scenarios and confidence interval coverage
+       without requiring full dataset re-ingestion.
+    """
+    dataset_meta = default_dataset_manager.get_dataset(dataset_id)
+    if dataset_meta is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Dataset '{dataset_id}' not found or has expired.",
+        )
+
+    file_path = default_dataset_manager.get_dataset_file_path(dataset_id)
+    if file_path is None or not file_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Dataset file for '{dataset_id}' is not available on disk.",
+        )
+
+    biases = (
+        payload.hypothetical_biases
+        if payload.hypothetical_biases is not None
+        else payload.bias_values
+    )
+    resolved_control = (
+        payload.control_value
+        if payload.control_value is not None
+        else payload.untreated_value
+    )
+
+    if payload.treatment_col and payload.outcome_col:
+        available_cols = [c.name for c in dataset_meta.columns]
+        if payload.treatment_col not in available_cols:
+            raise HTTPException(
+                status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+                detail=(
+                    f"Treatment column '{payload.treatment_col}' not found in dataset. "
+                    f"Available columns: {available_cols}"
+                ),
+            )
+        if payload.outcome_col not in available_cols:
+            raise HTTPException(
+                status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+                detail=(
+                    f"Outcome column '{payload.outcome_col}' not found in dataset. "
+                    f"Available columns: {available_cols}"
+                ),
+            )
+        if payload.confounder_cols:
+            for c_col in payload.confounder_cols:
+                if c_col not in available_cols:
+                    raise HTTPException(
+                        status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+                        detail=(
+                            f"Confounder column '{c_col}' not found in dataset. "
+                            f"Available columns: {available_cols}"
+                        ),
+                    )
+
+        if dataset_meta.row_count == 0:
+            raise HTTPException(
+                status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+                detail="Dataset is empty (0 rows). Causal inference requires observations.",
+            )
+
+        cols_to_read = [payload.treatment_col, payload.outcome_col]
+        if payload.confounder_cols:
+            for c in payload.confounder_cols:
+                if c not in cols_to_read:
+                    cols_to_read.append(c)
+
+        try:
+            df = pd.read_csv(
+                file_path,
+                usecols=cols_to_read,
+                na_values=list(MISSING_TOKENS),
+                keep_default_na=True,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+                detail=f"Failed to read dataset columns: {exc}",
+            )
+
+        if df.empty:
+            raise HTTPException(
+                status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+                detail="Dataset is empty (0 rows). Causal inference requires observations.",
+            )
+
+        resolved_treated = _coerce_label_to_series_dtype(payload.treated_value, df[payload.treatment_col])
+        resolved_untreated = _coerce_label_to_series_dtype(resolved_control, df[payload.treatment_col])
+
+        try:
+            results = run_causal_sensitivity_analysis(
+                data=df,
+                treatment_col=payload.treatment_col,
+                outcome_col=payload.outcome_col,
+                confounder_cols=payload.confounder_cols,
+                treated_value=resolved_treated,
+                control_value=resolved_untreated,
+                drop_missing=payload.drop_missing,
+                reference_estimator=payload.reference_estimator or "regression_adjusted",
+                truncation_thresholds=payload.truncation_thresholds,
+                hypothetical_biases=biases,
+            )
+            unmeas = results.get("unmeasured_confounding_analysis")
+            if isinstance(unmeas, dict) and "bias_scenarios" in unmeas:
+                results["bias_scenarios"] = unmeas.get("bias_scenarios")
+                results["sign_convention"] = unmeas.get("sign_convention")
+            results["dataset_id"] = dataset_id
+            results["dataset_filename"] = dataset_meta.filename
+            results["total_dataset_rows"] = dataset_meta.row_count
+            return _sanitize_for_json(results)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+                detail=str(exc),
+            )
+    else:
+        try:
+            results = analyze_unmeasured_confounding_sensitivity(
+                observed_estimate=payload.observed_estimate,
+                bias_values=biases,
+                confidence_interval=payload.confidence_interval,
+            )
+            results["reference_estimator"] = payload.reference_estimator or "user_supplied"
+            results["reference_estimate"] = results["observed_estimate"]
+            results["unmeasured_confounding_analysis"] = dict(results)
+            results["dataset_id"] = dataset_id
+            results["dataset_filename"] = dataset_meta.filename
+            results["total_dataset_rows"] = dataset_meta.row_count
+            return _sanitize_for_json(results)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+                detail=str(exc),
+            )
+
+
 if __name__ == "__main__":
     uvicorn.run("api:app", host="127.0.0.1", port=8000, reload=True)
 

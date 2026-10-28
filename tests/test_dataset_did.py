@@ -617,4 +617,4 @@ def test_dashboard_html_contains_did_section():
     assert 'id="did-2x2-table"' in html
     assert 'id="res-did-interpretation-text"' in html
     assert 'id="res-did-assumptions-text"' in html
-    assert '7. Available Causal Analysis Methods' in html
+    assert 'Available Causal Analysis Methods' in html
