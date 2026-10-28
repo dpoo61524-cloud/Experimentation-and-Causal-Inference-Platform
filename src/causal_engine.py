@@ -2473,3 +2473,587 @@ def estimate_iptw_ate(
         "interpretation": interpretation_text,
         "assumptions": assumptions_text,
     }
+
+
+# ============================================================================
+# Difference-in-Differences (DiD) Estimation Foundation
+# ============================================================================
+
+def validate_did_data(
+    data: Any,
+    treatment_col: str,
+    time_col: Optional[str] = None,
+    outcome_col: Optional[str] = None,
+    treated_value: Optional[Any] = None,
+    control_value: Optional[Any] = None,
+    pre_value: Optional[Any] = None,
+    post_value: Optional[Any] = None,
+    drop_missing: bool = False,
+    untreated_value: Optional[Any] = None,
+    pre_period_value: Optional[Any] = None,
+    post_period_value: Optional[Any] = None,
+    time_period_col: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Validate tabular causal data for Difference-in-Differences (DiD) estimation.
+
+    Parameters:
+    -----------
+    data : pd.DataFrame, Dict[str, Sequence], or List[Dict[str, Any]]
+        The tabular dataset to validate.
+    treatment_col : str
+        Name of the treatment-group column distinguishing treated from control units.
+    time_col : str, optional
+        Name of the time-period column distinguishing pre-intervention from post-intervention.
+    outcome_col : str, optional
+        Name of the numeric outcome column.
+    treated_value : Any, optional
+        Label identifying the treated group.
+    control_value : Any, optional
+        Label identifying the control group.
+    pre_value : Any, optional
+        Label identifying the pre-intervention period.
+    post_value : Any, optional
+        Label identifying the post-intervention period.
+    drop_missing : bool, default False
+        Explicit missing data policy:
+        - If False (default): raises ValueError if any missing values exist in analysis columns.
+        - If True: explicitly drops rows containing missing values in treatment, time, or outcome columns.
+    untreated_value : Any, optional
+        Alias for control_value.
+    pre_period_value : Any, optional
+        Alias for pre_value.
+    post_period_value : Any, optional
+        Alias for post_value.
+    time_period_col : str, optional
+        Alias for time_col.
+
+    Returns:
+    --------
+    Dict[str, Any]
+        Dictionary containing validated DataFrame, resolved labels, masks, and cell counts.
+
+    Raises:
+    -------
+    ValueError:
+        If columns are missing, data is empty, labels are invalid, outcome is non-numeric,
+        or any of the four group-period cells has 0 observations.
+    """
+    # 1. Alias Resolution
+    if control_value is None and untreated_value is not None:
+        control_value = untreated_value
+    if pre_value is None and pre_period_value is not None:
+        pre_value = pre_period_value
+    if post_value is None and post_period_value is not None:
+        post_value = post_period_value
+    if time_col is None and time_period_col is not None:
+        time_col = time_period_col
+
+    if not isinstance(treatment_col, str) or not treatment_col.strip():
+        raise ValueError("treatment_col must be a non-empty string.")
+    if time_col is None or not isinstance(time_col, str) or not time_col.strip():
+        raise ValueError("time_col (or time_period_col) must be a non-empty string.")
+    if outcome_col is None or not isinstance(outcome_col, str) or not outcome_col.strip():
+        raise ValueError("outcome_col must be a non-empty string.")
+
+    # 2. Distinct Column Checks
+    if treatment_col == outcome_col:
+        raise ValueError(
+            f"treatment_col and outcome_col cannot be the same column ('{treatment_col}')."
+        )
+    if time_col == outcome_col:
+        raise ValueError(
+            f"time_col and outcome_col cannot be the same column ('{time_col}')."
+        )
+    if treatment_col == time_col:
+        raise ValueError(
+            f"treatment_col and time_col cannot be the same column ('{treatment_col}')."
+        )
+
+    # 3. DataFrame Conversion & Column Existence
+    df = _to_dataframe(data)
+    available_cols = list(df.columns)
+
+    if treatment_col not in df.columns:
+        raise ValueError(
+            f"Treatment column '{treatment_col}' not found in dataset. "
+            f"Available columns: {available_cols}"
+        )
+    if time_col not in df.columns:
+        raise ValueError(
+            f"Time-period column '{time_col}' not found in dataset. "
+            f"Available columns: {available_cols}"
+        )
+    if outcome_col not in df.columns:
+        raise ValueError(
+            f"Outcome column '{outcome_col}' not found in dataset. "
+            f"Available columns: {available_cols}"
+        )
+
+    # 4. Explicit Missing Data Policy
+    required_cols = [treatment_col, time_col, outcome_col]
+    missing_series = df[required_cols].isnull().sum()
+    columns_with_missing = missing_series[missing_series > 0]
+
+    rows_dropped = 0
+    if not columns_with_missing.empty:
+        if not drop_missing:
+            detail_list = [f"{col}: {cnt}" for col, cnt in columns_with_missing.items()]
+            raise ValueError(
+                f"Dataset contains missing values in required columns ({', '.join(detail_list)}). "
+                "Missing rows are not dropped silently. Set drop_missing=True to explicitly drop incomplete observations."
+            )
+        else:
+            initial_count = len(df)
+            df = df.dropna(subset=required_cols).copy()
+            rows_dropped = initial_count - len(df)
+            if len(df) == 0:
+                raise ValueError(
+                    f"After dropping rows with missing values, no observations remain (dropped {rows_dropped} rows)."
+                )
+
+    # 5. Outcome Column Validation
+    outcome_series = df[outcome_col]
+    if pd.api.types.is_bool_dtype(outcome_series) or any(isinstance(v, bool) for v in outcome_series):
+        raise ValueError(
+            f"Outcome column '{outcome_col}' must be numeric, but contains boolean values."
+        )
+
+    try:
+        numeric_outcomes = pd.to_numeric(outcome_series, errors="raise")
+    except (ValueError, TypeError) as exc:
+        raise ValueError(
+            f"Outcome column '{outcome_col}' contains non-numeric values: {exc}"
+        )
+
+    if np.isinf(numeric_outcomes).any():
+        raise ValueError(
+            f"Outcome column '{outcome_col}' contains infinite values (inf or -inf)."
+        )
+    if np.isnan(numeric_outcomes).any():
+        raise ValueError(
+            f"Outcome column '{outcome_col}' contains missing/NaN values."
+        )
+
+    # 6. Treatment Column Validation & Binary Label Resolution
+    treatment_series = df[treatment_col]
+    unique_treatment = list(pd.unique(treatment_series))
+
+    if len(unique_treatment) == 0:
+        raise ValueError(f"Treatment column '{treatment_col}' contains no observations.")
+
+    if treated_value is not None and control_value is not None:
+        if treated_value == control_value:
+            raise ValueError("treated_value and control_value cannot be identical.")
+
+        is_valid_t = treatment_series.isin([treated_value, control_value])
+        if not is_valid_t.all():
+            unexpected = list(treatment_series[~is_valid_t].unique())
+            raise ValueError(
+                f"Treatment column '{treatment_col}' contains values other than specified treated "
+                f"({treated_value!r}) and control ({control_value!r}) labels: {unexpected}."
+            )
+        if (treatment_series == treated_value).sum() == 0:
+            raise ValueError(
+                f"Specified treated label ({treated_value!r}) not found in treatment column '{treatment_col}'. "
+                f"Available values: {unique_treatment}"
+            )
+        if (treatment_series == control_value).sum() == 0:
+            raise ValueError(
+                f"Specified control label ({control_value!r}) not found in treatment column '{treatment_col}'. "
+                f"Available values: {unique_treatment}"
+            )
+        resolved_treated = treated_value
+        resolved_control = control_value
+    elif treated_value is not None or control_value is not None:
+        raise ValueError(
+            "Both treated_value and control_value must be provided together, or neither to infer them."
+        )
+    else:
+        if len(unique_treatment) > 2:
+            raise ValueError(
+                f"Treatment column '{treatment_col}' must be binary, but contains {len(unique_treatment)} "
+                f"unique values: {unique_treatment}. "
+                "Please specify treated_value and control_value or subset the dataset."
+            )
+        if len(unique_treatment) == 1:
+            raise ValueError(
+                f"Treatment column '{treatment_col}' contains only 1 unique value ({unique_treatment[0]!r}). "
+                "Difference-in-Differences requires both treated and control observations."
+            )
+
+        unique_t_set = set(unique_treatment)
+        if unique_t_set == {0, 1}:
+            resolved_treated, resolved_control = 1, 0
+        elif unique_t_set == {False, True}:
+            resolved_treated, resolved_control = True, False
+        else:
+            s0 = str(unique_treatment[0]).lower()
+            s1 = str(unique_treatment[1]).lower()
+            if "treat" in s0 and ("control" in s1 or "untreat" in s1):
+                resolved_treated, resolved_control = unique_treatment[0], unique_treatment[1]
+            elif "treat" in s1 and ("control" in s0 or "untreat" in s0):
+                resolved_treated, resolved_control = unique_treatment[1], unique_treatment[0]
+            else:
+                sorted_vals = sorted(unique_treatment, key=lambda v: str(v))
+                resolved_control, resolved_treated = sorted_vals[0], sorted_vals[1]
+
+    # 7. Time Column Validation & Binary Period Resolution
+    time_series = df[time_col]
+    unique_time = list(pd.unique(time_series))
+
+    if len(unique_time) == 0:
+        raise ValueError(f"Time-period column '{time_col}' contains no observations.")
+
+    if pre_value is not None and post_value is not None:
+        if pre_value == post_value:
+            raise ValueError("pre_value and post_value cannot be identical.")
+
+        is_valid_time = time_series.isin([pre_value, post_value])
+        if not is_valid_time.all():
+            unexpected_time = list(time_series[~is_valid_time].unique())
+            raise ValueError(
+                f"Time-period column '{time_col}' contains values other than specified pre "
+                f"({pre_value!r}) and post ({post_value!r}) labels: {unexpected_time}."
+            )
+        if (time_series == pre_value).sum() == 0:
+            raise ValueError(
+                f"Specified pre-intervention label ({pre_value!r}) not found in time-period column '{time_col}'. "
+                f"Available values: {unique_time}"
+            )
+        if (time_series == post_value).sum() == 0:
+            raise ValueError(
+                f"Specified post-intervention label ({post_value!r}) not found in time-period column '{time_col}'. "
+                f"Available values: {unique_time}"
+            )
+        resolved_pre = pre_value
+        resolved_post = post_value
+    elif pre_value is not None or post_value is not None:
+        raise ValueError(
+            "Both pre_value and post_value must be provided together, or neither to infer them."
+        )
+    else:
+        if len(unique_time) > 2:
+            raise ValueError(
+                f"Time-period column '{time_col}' must contain exactly 2 unique periods (pre and post), "
+                f"but contains {len(unique_time)}: {unique_time}. "
+                "Please specify pre_value and post_value or subset the dataset."
+            )
+        if len(unique_time) == 1:
+            raise ValueError(
+                f"Time-period column '{time_col}' contains only 1 unique value ({unique_time[0]!r}). "
+                "Difference-in-Differences requires both pre- and post-intervention periods."
+            )
+
+        unique_time_set = set(unique_time)
+        if unique_time_set == {0, 1}:
+            resolved_pre, resolved_post = 0, 1
+        elif unique_time_set == {False, True}:
+            resolved_pre, resolved_post = False, True
+        else:
+            s0 = str(unique_time[0]).lower()
+            s1 = str(unique_time[1]).lower()
+            if "post" in s0 and "pre" in s1:
+                resolved_post, resolved_pre = unique_time[0], unique_time[1]
+            elif "post" in s1 and "pre" in s0:
+                resolved_post, resolved_pre = unique_time[1], unique_time[0]
+            elif "after" in s0 and "before" in s1:
+                resolved_post, resolved_pre = unique_time[0], unique_time[1]
+            elif "after" in s1 and "before" in s0:
+                resolved_post, resolved_pre = unique_time[1], unique_time[0]
+            else:
+                sorted_time = sorted(unique_time, key=lambda v: str(v))
+                resolved_pre, resolved_post = sorted_time[0], sorted_time[1]
+
+    # 8. Four Group-Period Cells Validation
+    mask_t_pre = (treatment_series == resolved_treated) & (time_series == resolved_pre)
+    mask_t_post = (treatment_series == resolved_treated) & (time_series == resolved_post)
+    mask_c_pre = (treatment_series == resolved_control) & (time_series == resolved_pre)
+    mask_c_post = (treatment_series == resolved_control) & (time_series == resolved_post)
+
+    n_t_pre = int(mask_t_pre.sum())
+    n_t_post = int(mask_t_post.sum())
+    n_c_pre = int(mask_c_pre.sum())
+    n_c_post = int(mask_c_post.sum())
+
+    empty_cells = []
+    if n_t_pre == 0:
+        empty_cells.append(f"Treatment Pre (treatment={resolved_treated!r}, period={resolved_pre!r})")
+    if n_t_post == 0:
+        empty_cells.append(f"Treatment Post (treatment={resolved_treated!r}, period={resolved_post!r})")
+    if n_c_pre == 0:
+        empty_cells.append(f"Control Pre (treatment={resolved_control!r}, period={resolved_pre!r})")
+    if n_c_post == 0:
+        empty_cells.append(f"Control Post (treatment={resolved_control!r}, period={resolved_post!r})")
+
+    if empty_cells:
+        raise ValueError(
+            f"Difference-in-Differences requires at least one observation in all four group-period cells. "
+            f"Empty cell(s) found: {', '.join(empty_cells)}."
+        )
+
+    return {
+        "is_valid": True,
+        "validated_data": df,
+        "treatment_col": treatment_col,
+        "time_col": time_col,
+        "outcome_col": outcome_col,
+        "treated_value": resolved_treated,
+        "control_value": resolved_control,
+        "pre_value": resolved_pre,
+        "post_value": resolved_post,
+        "rows_dropped": rows_dropped,
+        "n_total": len(df),
+        "cell_counts": {
+            "treatment_pre": n_t_pre,
+            "treatment_post": n_t_post,
+            "control_pre": n_c_pre,
+            "control_post": n_c_post,
+        },
+        "mask_treatment_pre": mask_t_pre,
+        "mask_treatment_post": mask_t_post,
+        "mask_control_pre": mask_c_pre,
+        "mask_control_post": mask_c_post,
+        "numeric_outcomes": numeric_outcomes,
+    }
+
+
+def estimate_difference_in_differences(
+    data: Any,
+    treatment_col: str,
+    time_col: Optional[str] = None,
+    outcome_col: Optional[str] = None,
+    treated_value: Optional[Any] = None,
+    control_value: Optional[Any] = None,
+    pre_value: Optional[Any] = None,
+    post_value: Optional[Any] = None,
+    drop_missing: bool = False,
+    untreated_value: Optional[Any] = None,
+    pre_period_value: Optional[Any] = None,
+    post_period_value: Optional[Any] = None,
+    time_period_col: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Estimate treatment effect using Difference-in-Differences (DiD).
+
+    Methodology & Formula:
+    ----------------------
+    Difference-in-Differences compares the before-and-after outcome change observed in a
+    treatment group to the before-and-after outcome change observed in a control group:
+
+    1. Group-Period Sample Means:
+       - Treatment pre-intervention mean:  Ybar_{T,pre}  = mean(Y | T = treated, Time = pre)
+       - Treatment post-intervention mean: Ybar_{T,post} = mean(Y | T = treated, Time = post)
+       - Control pre-intervention mean:    Ybar_{C,pre}  = mean(Y | T = control, Time = pre)
+       - Control post-intervention mean:   Ybar_{C,post} = mean(Y | T = control, Time = post)
+
+    2. Time Differences:
+       - Treatment group change: Delta_T = Ybar_{T,post} - Ybar_{T,pre}
+       - Control group change:   Delta_C = Ybar_{C,post} - Ybar_{C,pre}
+
+    3. Difference-in-Differences Estimate:
+       - DiD = Delta_T - Delta_C = (Ybar_{T,post} - Ybar_{T,pre}) - (Ybar_{C,post} - Ybar_{C,pre})
+
+    Identifying Causal Assumptions:
+    -------------------------------
+    Difference-in-Differences identifies the Average Treatment Effect on the Treated (ATT)
+    under five core structural assumptions:
+    1. Parallel Trends: In the counterfactual absence of treatment, the average outcome in the
+       treatment group would have evolved along the exact same trajectory as the control group:
+           E[Y(0)_post - Y(0)_pre | T = 1] = E[Y(0)_post - Y(0)_pre | T = 0]
+    2. No Anticipation: Units do not alter their behavior or outcomes in anticipation of future
+       treatment before the intervention occurs (pre-period outcomes are uncontaminated).
+    3. No Differential Concurrent Shocks: No extraneous policy change, economic disruption, or
+       confounding event coincided with the intervention that selectively affected the treated
+       or control group.
+    4. Consistent Measurement & Stable Group Definitions: The outcome variable is measured with
+       identical methodology across both periods, and group membership does not shift dynamically.
+    5. No Spillover Effects (SUTVA): The intervention applied to treated units does not indirectly
+       alter outcomes among control units.
+
+    Critical Limitations:
+    ---------------------
+    - These identifying assumptions cannot be proven purely from computing the DiD point estimate.
+    - DiD accommodates repeated cross-sections or panel data, but observations must not be assumed
+      independent when the same individuals or units are measured across multiple periods.
+
+    Parameters:
+    -----------
+    data : pd.DataFrame, Dict[str, Sequence], or List[Dict[str, Any]]
+        The tabular dataset to analyze.
+    treatment_col : str
+        Name of the treatment-group column.
+    time_col : str, optional
+        Name of the time-period column.
+    outcome_col : str, optional
+        Name of the numeric outcome column.
+    treated_value : Any, optional
+        Label identifying the treated group. Inferred automatically if None.
+    control_value : Any, optional
+        Label identifying the control group. Inferred automatically if None.
+    pre_value : Any, optional
+        Label identifying the pre-intervention period. Inferred automatically if None.
+    post_value : Any, optional
+        Label identifying the post-intervention period. Inferred automatically if None.
+    drop_missing : bool, default False
+        Explicit missing data policy:
+        - If False (default): raises ValueError if missing values exist in analysis columns.
+        - If True: drops incomplete observations and records rows_dropped.
+    untreated_value : Any, optional
+        Alias for control_value.
+    pre_period_value : Any, optional
+        Alias for pre_value.
+    post_period_value : Any, optional
+        Alias for post_value.
+    time_period_col : str, optional
+        Alias for time_col.
+
+    Returns:
+    --------
+    Dict[str, Any]
+        Structured dictionary containing:
+        - 'estimator': 'difference_in_differences'
+        - 'did_estimate': Difference-in-Differences point estimate
+        - 'did': Alias for did_estimate
+        - 'ate': Alias for did_estimate
+        - 'treatment_mean_pre': Mean outcome for treated units before intervention
+        - 'treatment_mean_post': Mean outcome for treated units after intervention
+        - 'control_mean_pre': Mean outcome for control units before intervention
+        - 'control_mean_post': Mean outcome for control units after intervention
+        - 'treated_mean_pre': Alias for treatment_mean_pre
+        - 'treated_mean_post': Alias for treatment_mean_post
+        - 'treatment_change': Outcome change for treated units (post - pre)
+        - 'control_change': Outcome change for control units (post - pre)
+        - 'delta_treatment': Alias for treatment_change
+        - 'delta_control': Alias for control_change
+        - 'delta_treated': Alias for treatment_change
+        - 'cell_counts': Dictionary with counts for the 4 cells
+        - 'n_treatment_pre': Count of treated observations in pre-period
+        - 'n_treatment_post': Count of treated observations in post-period
+        - 'n_control_pre': Count of control observations in pre-period
+        - 'n_control_post': Count of control observations in post-period
+        - 'n_treated_pre': Alias for n_treatment_pre
+        - 'n_treated_post': Alias for n_treatment_post
+        - 'n_treated': Total treated observations
+        - 'n_control': Total control observations
+        - 'n_untreated': Alias for n_control
+        - 'n_total': Total observations used
+        - 'rows_dropped': Number of rows dropped due to missing data
+        - 'treatment_col': Treatment column name
+        - 'time_col': Time-period column name
+        - 'time_period_col': Alias for time_col
+        - 'outcome_col': Outcome column name
+        - 'treated_value': Resolved treated label
+        - 'control_value': Resolved control label
+        - 'untreated_value': Alias for control_value
+        - 'pre_value': Resolved pre-period label
+        - 'post_value': Resolved post-period label
+        - 'interpretation': Narrative summary of results
+        - 'assumptions': Educational explanation of identifying assumptions and limitations
+    """
+    val_res = validate_did_data(
+        data=data,
+        treatment_col=treatment_col,
+        time_col=time_col,
+        outcome_col=outcome_col,
+        treated_value=treated_value,
+        control_value=control_value,
+        pre_value=pre_value,
+        post_value=post_value,
+        drop_missing=drop_missing,
+        untreated_value=untreated_value,
+        pre_period_value=pre_period_value,
+        post_period_value=post_period_value,
+        time_period_col=time_period_col,
+    )
+
+    numeric_outcomes = val_res["numeric_outcomes"]
+    mask_t_pre = val_res["mask_treatment_pre"]
+    mask_t_post = val_res["mask_treatment_post"]
+    mask_c_pre = val_res["mask_control_pre"]
+    mask_c_post = val_res["mask_control_post"]
+
+    mean_t_pre = float(numeric_outcomes[mask_t_pre].mean())
+    mean_t_post = float(numeric_outcomes[mask_t_post].mean())
+    mean_c_pre = float(numeric_outcomes[mask_c_pre].mean())
+    mean_c_post = float(numeric_outcomes[mask_c_post].mean())
+
+    delta_t = float(mean_t_post - mean_t_pre)
+    delta_c = float(mean_c_post - mean_c_pre)
+    did = float(delta_t - delta_c)
+
+    cell_counts = val_res["cell_counts"]
+    n_t_pre = cell_counts["treatment_pre"]
+    n_t_post = cell_counts["treatment_post"]
+    n_c_pre = cell_counts["control_pre"]
+    n_c_post = cell_counts["control_post"]
+
+    interpretation_text = (
+        f"The Difference-in-Differences (DiD) treatment effect estimate is {did:.4f}. "
+        f"Treatment group outcome changed by {delta_t:.4f} (from {mean_t_pre:.4f} pre-intervention "
+        f"to {mean_t_post:.4f} post-intervention; n_pre={n_t_pre}, n_post={n_t_post}). "
+        f"Control group outcome changed by {delta_c:.4f} (from {mean_c_pre:.4f} pre-intervention "
+        f"to {mean_c_post:.4f} post-intervention; n_pre={n_c_pre}, n_post={n_c_post})."
+    )
+
+    assumptions_text = (
+        "Difference-in-Differences (DiD) identifies the causal treatment effect under five core assumptions: "
+        "(1) Parallel Trends: In the absence of treatment, the average outcome of the treatment group would "
+        "have evolved with the same trajectory as the control group (E[Y(0)_post - Y(0)_pre | T=1] = "
+        "E[Y(0)_post - Y(0)_pre | T=0]); "
+        "(2) No Anticipation: Units do not change their behavior or outcomes in anticipation of future treatment "
+        "prior to the post-intervention period; "
+        "(3) No Differential Concurrent Shocks: No other contemporaneous event or external policy shock "
+        "affected the treatment group differently from the control group at or around the intervention time; "
+        "(4) Consistent Measurement and Stable Group Definitions: Outcome measurement methods and group "
+        "classifications remain invariant and comparable across both pre and post periods; and "
+        "(5) No Spillover Effects (SUTVA): The intervention in the treated group does not affect the outcomes "
+        "of units in the control group. "
+        "Critical limitations: These identifying assumptions cannot be proven solely by computing the point estimate. "
+        "DiD point estimation accommodates repeated cross-sections or panel data, but observations should not "
+        "be assumed independent when identical subjects are measured repeatedly across time periods."
+    )
+
+    return {
+        "estimator": "difference_in_differences",
+        "did_estimate": did,
+        "did": did,
+        "ate": did,
+        "treatment_mean_pre": mean_t_pre,
+        "treatment_mean_post": mean_t_post,
+        "control_mean_pre": mean_c_pre,
+        "control_mean_post": mean_c_post,
+        "treated_mean_pre": mean_t_pre,
+        "treated_mean_post": mean_t_post,
+        "treatment_change": delta_t,
+        "control_change": delta_c,
+        "delta_treatment": delta_t,
+        "delta_control": delta_c,
+        "delta_treated": delta_t,
+        "cell_counts": {
+            "treatment_pre": n_t_pre,
+            "treatment_post": n_t_post,
+            "control_pre": n_c_pre,
+            "control_post": n_c_post,
+        },
+        "n_treatment_pre": n_t_pre,
+        "n_treatment_post": n_t_post,
+        "n_control_pre": n_c_pre,
+        "n_control_post": n_c_post,
+        "n_treated_pre": n_t_pre,
+        "n_treated_post": n_t_post,
+        "n_treated": n_t_pre + n_t_post,
+        "n_control": n_c_pre + n_c_post,
+        "n_untreated": n_c_pre + n_c_post,
+        "n_total": n_t_pre + n_t_post + n_c_pre + n_c_post,
+        "rows_dropped": val_res["rows_dropped"],
+        "treatment_col": val_res["treatment_col"],
+        "time_col": val_res["time_col"],
+        "time_period_col": val_res["time_col"],
+        "outcome_col": val_res["outcome_col"],
+        "treated_value": val_res["treated_value"],
+        "control_value": val_res["control_value"],
+        "untreated_value": val_res["control_value"],
+        "pre_value": val_res["pre_value"],
+        "post_value": val_res["post_value"],
+        "interpretation": interpretation_text,
+        "assumptions": assumptions_text,
+    }

@@ -21,6 +21,8 @@ from causal_engine import (
     compute_effective_sample_size,
     compute_weighted_covariate_balance,
     estimate_iptw_ate,
+    validate_did_data,
+    estimate_difference_in_differences,
 )
 
 
@@ -1851,3 +1853,442 @@ def test_iptw_warning_behavior_for_poor_overlap_and_extreme_weights():
     res = estimate_iptw_ate(df, "t", "y", ["x"], extreme_weight_threshold=5.0)
     assert len(res["warnings"]) > 0
     assert any("warning" in w.lower() for w in res["warnings"])
+
+
+# ============================================================================
+# 12. Difference-in-Differences (DiD) Estimator Tests
+# ============================================================================
+
+def test_did_known_hand_calculated_example():
+    """Verify DiD estimator against an independently hand-calculated example."""
+    # Treated Pre: [10.0, 12.0] -> mean = 11.0, n=2
+    # Treated Post: [18.0, 22.0] -> mean = 20.0, n=2 -> change = +9.0
+    # Control Pre: [5.0, 7.0] -> mean = 6.0, n=2
+    # Control Post: [8.0, 10.0] -> mean = 9.0, n=2 -> change = +3.0
+    # Expected DiD = 9.0 - 3.0 = 6.0
+    df = pd.DataFrame({
+        "treatment": [1, 1, 1, 1, 0, 0, 0, 0],
+        "time": [0, 0, 1, 1, 0, 0, 1, 1],
+        "outcome": [10.0, 12.0, 18.0, 22.0, 5.0, 7.0, 8.0, 10.0],
+    })
+
+    res = estimate_difference_in_differences(
+        data=df,
+        treatment_col="treatment",
+        time_col="time",
+        outcome_col="outcome",
+    )
+
+    assert res["estimator"] == "difference_in_differences"
+    assert res["treatment_mean_pre"] == pytest.approx(11.0)
+    assert res["treatment_mean_post"] == pytest.approx(20.0)
+    assert res["control_mean_pre"] == pytest.approx(6.0)
+    assert res["control_mean_post"] == pytest.approx(9.0)
+    assert res["treatment_change"] == pytest.approx(9.0)
+    assert res["control_change"] == pytest.approx(3.0)
+    assert res["did_estimate"] == pytest.approx(6.0)
+    assert res["did"] == pytest.approx(6.0)
+    assert res["ate"] == pytest.approx(6.0)
+    assert res["n_total"] == 8
+    assert res["rows_dropped"] == 0
+
+
+def test_did_zero_treatment_effect():
+    """Verify that DiD correctly identifies a true zero treatment effect."""
+    # Both groups increase by 5.0 units between pre and post
+    df = pd.DataFrame({
+        "group": [1, 1, 1, 1, 0, 0, 0, 0],
+        "period": [0, 0, 1, 1, 0, 0, 1, 1],
+        "val": [10.0, 12.0, 15.0, 17.0, 20.0, 22.0, 25.0, 27.0],
+    })
+
+    res = estimate_difference_in_differences(
+        data=df,
+        treatment_col="group",
+        time_col="period",
+        outcome_col="val",
+    )
+
+    assert res["treatment_change"] == pytest.approx(5.0)
+    assert res["control_change"] == pytest.approx(5.0)
+    assert res["did_estimate"] == pytest.approx(0.0)
+
+
+def test_did_positive_treatment_effect():
+    """Verify positive treatment effect when treated group gains more than control."""
+    # Treated changes from 10 to 20 (+10); Control changes from 10 to 12 (+2) -> DiD = +8
+    df = pd.DataFrame({
+        "t": [1, 1, 0, 0],
+        "post": [0, 1, 0, 1],
+        "y": [10.0, 20.0, 10.0, 12.0],
+    })
+
+    res = estimate_difference_in_differences(df, "t", "post", "y")
+    assert res["treatment_change"] == pytest.approx(10.0)
+    assert res["control_change"] == pytest.approx(2.0)
+    assert res["did_estimate"] == pytest.approx(8.0)
+    assert res["did_estimate"] > 0
+
+
+def test_did_negative_treatment_effect():
+    """Verify negative treatment effect when control group gains more than treated."""
+    # Treated changes from 20 to 22 (+2); Control changes from 20 to 28 (+8) -> DiD = -6
+    df = pd.DataFrame({
+        "t": [1, 1, 0, 0],
+        "post": [0, 1, 0, 1],
+        "y": [20.0, 22.0, 20.0, 28.0],
+    })
+
+    res = estimate_difference_in_differences(df, "t", "post", "y")
+    assert res["treatment_change"] == pytest.approx(2.0)
+    assert res["control_change"] == pytest.approx(8.0)
+    assert res["did_estimate"] == pytest.approx(-6.0)
+    assert res["did_estimate"] < 0
+
+
+def test_did_correct_calculation_of_all_four_means_and_both_group_changes():
+    """Verify that all 4 cell means and both group differences are correctly computed."""
+    df = pd.DataFrame({
+        "t": [1, 1, 1, 1, 0, 0, 0, 0],
+        "time": ["pre", "pre", "post", "post", "pre", "pre", "post", "post"],
+        "outcome": [100.0, 110.0, 130.0, 150.0, 50.0, 70.0, 60.0, 80.0],
+    })
+
+    res = estimate_difference_in_differences(df, "t", "time", "outcome", pre_value="pre", post_value="post")
+
+    assert res["treatment_mean_pre"] == pytest.approx(105.0)
+    assert res["treated_mean_pre"] == pytest.approx(105.0)
+    assert res["treatment_mean_post"] == pytest.approx(140.0)
+    assert res["treated_mean_post"] == pytest.approx(140.0)
+    assert res["control_mean_pre"] == pytest.approx(60.0)
+    assert res["control_mean_post"] == pytest.approx(70.0)
+    assert res["treatment_change"] == pytest.approx(35.0)
+    assert res["delta_treatment"] == pytest.approx(35.0)
+    assert res["delta_treated"] == pytest.approx(35.0)
+    assert res["control_change"] == pytest.approx(10.0)
+    assert res["delta_control"] == pytest.approx(10.0)
+    assert res["did_estimate"] == pytest.approx(25.0)
+
+
+def test_did_correct_observation_counts_for_every_cell():
+    """Verify observation counts for each cell and sample totals."""
+    # Cell counts: T,pre=2; T,post=3; C,pre=4; C,post=5 -> total = 14
+    df = pd.DataFrame({
+        "t": [1]*2 + [1]*3 + [0]*4 + [0]*5,
+        "time": [0]*2 + [1]*3 + [0]*4 + [1]*5,
+        "y": [1.0] * 14,
+    })
+
+    res = estimate_difference_in_differences(df, "t", "time", "y")
+
+    assert res["cell_counts"] == {
+        "treatment_pre": 2,
+        "treatment_post": 3,
+        "control_pre": 4,
+        "control_post": 5,
+    }
+    assert res["n_treatment_pre"] == 2
+    assert res["n_treatment_post"] == 3
+    assert res["n_control_pre"] == 4
+    assert res["n_control_post"] == 5
+    assert res["n_treated_pre"] == 2
+    assert res["n_treated_post"] == 3
+    assert res["n_treated"] == 5
+    assert res["n_control"] == 9
+    assert res["n_untreated"] == 9
+    assert res["n_total"] == 14
+
+
+def test_did_unequal_sample_sizes_across_cells():
+    """Verify that cells with unequal sample sizes are handled accurately."""
+    # T,pre: [10, 12, 14] -> mean = 12.0 (n=3)
+    # T,post: [20, 20, 20, 20, 20] -> mean = 20.0 (n=5)
+    # C,pre: [10, 10] -> mean = 10.0 (n=2)
+    # C,post: [12, 14, 16, 18] -> mean = 15.0 (n=4)
+    # Delta_T = 20 - 12 = 8; Delta_C = 15 - 10 = 5; DiD = 8 - 5 = 3
+    df = pd.DataFrame({
+        "t": [1, 1, 1] + [1, 1, 1, 1, 1] + [0, 0] + [0, 0, 0, 0],
+        "time": [0, 0, 0] + [1, 1, 1, 1, 1] + [0, 0] + [1, 1, 1, 1],
+        "y": [10.0, 12.0, 14.0] + [20.0]*5 + [10.0, 10.0] + [12.0, 14.0, 16.0, 18.0],
+    })
+
+    res = estimate_difference_in_differences(df, "t", "time", "y")
+    assert res["treatment_mean_pre"] == pytest.approx(12.0)
+    assert res["treatment_mean_post"] == pytest.approx(20.0)
+    assert res["control_mean_pre"] == pytest.approx(10.0)
+    assert res["control_mean_post"] == pytest.approx(15.0)
+    assert res["treatment_change"] == pytest.approx(8.0)
+    assert res["control_change"] == pytest.approx(5.0)
+    assert res["did_estimate"] == pytest.approx(3.0)
+
+
+def test_did_custom_treatment_and_control_labels():
+    """Verify DiD with custom treatment and control labels."""
+    df = pd.DataFrame({
+        "cohort": ["Intervention", "Intervention", "Standard", "Standard"],
+        "period": [0, 1, 0, 1],
+        "y": [10.0, 25.0, 10.0, 15.0],
+    })
+
+    res = estimate_difference_in_differences(
+        df,
+        treatment_col="cohort",
+        time_col="period",
+        outcome_col="y",
+        treated_value="Intervention",
+        control_value="Standard",
+    )
+
+    assert res["treated_value"] == "Intervention"
+    assert res["control_value"] == "Standard"
+    assert res["treatment_change"] == pytest.approx(15.0)
+    assert res["control_change"] == pytest.approx(5.0)
+    assert res["did_estimate"] == pytest.approx(10.0)
+
+
+def test_did_custom_pre_and_post_labels():
+    """Verify DiD with custom pre and post period labels."""
+    df = pd.DataFrame({
+        "t": [1, 1, 0, 0],
+        "wave": ["Baseline_2022", "Followup_2023", "Baseline_2022", "Followup_2023"],
+        "y": [50.0, 75.0, 50.0, 60.0],
+    })
+
+    res = estimate_difference_in_differences(
+        df,
+        treatment_col="t",
+        time_col="wave",
+        outcome_col="y",
+        pre_value="Baseline_2022",
+        post_value="Followup_2023",
+    )
+
+    assert res["pre_value"] == "Baseline_2022"
+    assert res["post_value"] == "Followup_2023"
+    assert res["treatment_change"] == pytest.approx(25.0)
+    assert res["control_change"] == pytest.approx(10.0)
+    assert res["did_estimate"] == pytest.approx(15.0)
+
+
+def test_did_missing_required_columns():
+    """Verify that missing columns raise descriptive ValueError."""
+    df = pd.DataFrame({"t": [1, 0], "period": [0, 1], "y": [10.0, 20.0]})
+
+    with pytest.raises(ValueError, match="Time-period column 'time' not found in dataset"):
+        estimate_difference_in_differences(df, "t", "time", "y")
+
+    with pytest.raises(ValueError, match="Treatment column 'missing_t' not found in dataset"):
+        estimate_difference_in_differences(df, "missing_t", "period", "y")
+
+    with pytest.raises(ValueError, match="Outcome column 'missing_y' not found in dataset"):
+        estimate_difference_in_differences(df, "t", "period", "missing_y")
+
+
+def test_did_invalid_treatment_labels():
+    """Verify rejection of invalid or unexpected treatment labels."""
+    # Extra unexpected category
+    df = pd.DataFrame({
+        "t": ["treated", "control", "unknown", "control"],
+        "time": [0, 1, 0, 1],
+        "y": [10.0, 20.0, 30.0, 40.0],
+    })
+
+    with pytest.raises(ValueError, match="must be binary, but contains 3 unique values"):
+        estimate_difference_in_differences(df, "t", "time", "y")
+
+    with pytest.raises(ValueError, match="contains values other than specified treated"):
+        estimate_difference_in_differences(
+            df, "t", "time", "y", treated_value="treated", control_value="control"
+        )
+
+
+def test_did_invalid_time_period_labels():
+    """Verify rejection of invalid or unexpected time period labels."""
+    df = pd.DataFrame({
+        "t": [1, 1, 0, 0, 1],
+        "time": ["2020", "2021", "2020", "2021", "2022"],
+        "y": [10.0, 20.0, 30.0, 40.0, 50.0],
+    })
+
+    with pytest.raises(ValueError, match="must contain exactly 2 unique periods"):
+        estimate_difference_in_differences(df, "t", "time", "y")
+
+    with pytest.raises(ValueError, match="contains values other than specified pre"):
+        estimate_difference_in_differences(
+            df, "t", "time", "y", pre_value="2020", post_value="2021"
+        )
+
+
+def test_did_missing_outcomes_under_default_missing_data_policy():
+    """Verify that default missing-data policy (drop_missing=False) raises on missing values."""
+    df = pd.DataFrame({
+        "t": [1, 1, 0, 0],
+        "time": [0, 1, 0, 1],
+        "y": [10.0, np.nan, 5.0, 8.0],
+    })
+
+    with pytest.raises(ValueError, match="contains missing values in required columns"):
+        estimate_difference_in_differences(df, "t", "time", "y", drop_missing=False)
+
+
+def test_did_explicit_missing_data_dropping():
+    """Verify that explicit drop_missing=True drops incomplete rows and reports count."""
+    df = pd.DataFrame({
+        "t": [1, 1, 0, 0, 1],
+        "time": [0, 1, 0, 1, 1],
+        "y": [10.0, 20.0, 5.0, 8.0, np.nan],
+    })
+
+    res = estimate_difference_in_differences(df, "t", "time", "y", drop_missing=True)
+    assert res["rows_dropped"] == 1
+    assert res["n_total"] == 4
+    assert res["did_estimate"] == pytest.approx(7.0)
+
+
+def test_did_empty_cell_error():
+    """Verify that missing observations in any of the 4 group-period cells raises ValueError."""
+    # Control Post (t=0, time=1) has 0 observations
+    df = pd.DataFrame({
+        "t": [1, 1, 0],
+        "time": [0, 1, 0],
+        "y": [10.0, 20.0, 5.0],
+    })
+
+    with pytest.raises(ValueError, match="Difference-in-Differences requires at least one observation in all four group-period cells"):
+        estimate_difference_in_differences(df, "t", "time", "y")
+
+
+def test_did_nonnumeric_outcomes_rejected():
+    """Verify rejection of non-numeric outcome strings."""
+    df = pd.DataFrame({
+        "t": [1, 1, 0, 0],
+        "time": [0, 1, 0, 1],
+        "y": ["a", "b", "c", "d"],
+    })
+
+    with pytest.raises(ValueError, match="contains non-numeric values"):
+        estimate_difference_in_differences(df, "t", "time", "y")
+
+
+def test_did_infinite_or_nan_outcomes_rejected():
+    """Verify rejection of infinite outcomes."""
+    df = pd.DataFrame({
+        "t": [1, 1, 0, 0],
+        "time": [0, 1, 0, 1],
+        "y": [10.0, np.inf, 5.0, 8.0],
+    })
+
+    with pytest.raises(ValueError, match="contains infinite values"):
+        estimate_difference_in_differences(df, "t", "time", "y")
+
+
+def test_did_boolean_outcomes_rejected():
+    """Verify rejection of boolean outcome columns."""
+    df = pd.DataFrame({
+        "t": [1, 1, 0, 0],
+        "time": [0, 1, 0, 1],
+        "y": [True, False, True, False],
+    })
+
+    with pytest.raises(ValueError, match="must be numeric, but contains boolean values"):
+        estimate_difference_in_differences(df, "t", "time", "y")
+
+
+def test_did_column_name_collisions():
+    """Verify rejection when same column is passed for multiple roles."""
+    df = pd.DataFrame({"col": [1, 0], "y": [10.0, 20.0]})
+
+    with pytest.raises(ValueError, match="cannot be the same column"):
+        estimate_difference_in_differences(df, "col", "col", "y")
+
+    with pytest.raises(ValueError, match="cannot be the same column"):
+        estimate_difference_in_differences(df, "col", "y", "y")
+
+
+def test_did_non_default_dataframe_indices():
+    """Verify correct alignment when DataFrame has custom non-default indices."""
+    df = pd.DataFrame(
+        {
+            "treatment": [1, 1, 0, 0],
+            "time": [0, 1, 0, 1],
+            "outcome": [10.0, 20.0, 5.0, 8.0],
+        },
+        index=["row_c", "row_a", "row_d", "row_b"],
+    )
+
+    res = estimate_difference_in_differences(df, "treatment", "time", "outcome")
+    assert res["did_estimate"] == pytest.approx(7.0)
+
+
+def test_did_alternative_input_formats():
+    """Verify support for dict of lists and list of dicts."""
+    dict_data = {
+        "t": [1, 1, 0, 0],
+        "time": [0, 1, 0, 1],
+        "y": [10.0, 25.0, 10.0, 15.0],
+    }
+    res_dict = estimate_difference_in_differences(dict_data, "t", "time", "y")
+    assert res_dict["did_estimate"] == pytest.approx(10.0)
+
+    list_data = [
+        {"t": 1, "time": 0, "y": 10.0},
+        {"t": 1, "time": 1, "y": 25.0},
+        {"t": 0, "time": 0, "y": 10.0},
+        {"t": 0, "time": 1, "y": 15.0},
+    ]
+    res_list = estimate_difference_in_differences(list_data, "t", "time", "y")
+    assert res_list["did_estimate"] == pytest.approx(10.0)
+
+
+def test_did_deterministic_reproducibility():
+    """Verify that repeated runs yield identical results."""
+    df = pd.DataFrame({
+        "t": [1, 1, 0, 0],
+        "time": [0, 1, 0, 1],
+        "y": [12.5, 30.5, 8.0, 14.0],
+    })
+
+    res1 = estimate_difference_in_differences(df, "t", "time", "y")
+    res2 = estimate_difference_in_differences(df, "t", "time", "y")
+
+    assert res1["did_estimate"] == pytest.approx(res2["did_estimate"])
+    assert res1["treatment_mean_pre"] == pytest.approx(res2["treatment_mean_pre"])
+    assert res1["treatment_mean_post"] == pytest.approx(res2["treatment_mean_post"])
+    assert res1["control_mean_pre"] == pytest.approx(res2["control_mean_pre"])
+    assert res1["control_mean_post"] == pytest.approx(res2["control_mean_post"])
+
+
+def test_did_assumptions_and_interpretation_content():
+    """Verify that assumptions and interpretation text are present and descriptive."""
+    df = pd.DataFrame({
+        "t": [1, 1, 0, 0],
+        "time": [0, 1, 0, 1],
+        "y": [10.0, 20.0, 5.0, 10.0],
+    })
+
+    res = estimate_difference_in_differences(df, "t", "time", "y")
+
+    assert "Parallel Trends" in res["assumptions"]
+    assert "No Anticipation" in res["assumptions"]
+    assert "No Differential Concurrent Shocks" in res["assumptions"]
+    assert "Consistent Measurement" in res["assumptions"]
+    assert "No Spillover Effects" in res["assumptions"]
+    assert "Difference-in-Differences" in res["interpretation"]
+    assert "Treatment group outcome changed" in res["interpretation"]
+
+
+def test_validate_did_data_standalone():
+    """Verify standalone functionality of validate_did_data."""
+    df = pd.DataFrame({
+        "t": [1, 1, 0, 0],
+        "time": [0, 1, 0, 1],
+        "y": [10.0, 20.0, 5.0, 10.0],
+    })
+
+    val = validate_did_data(df, "t", "time", "y")
+    assert val["is_valid"] is True
+    assert val["treated_value"] == 1
+    assert val["control_value"] == 0
+    assert val["pre_value"] == 0
+    assert val["post_value"] == 1
+    assert val["cell_counts"]["treatment_pre"] == 1
