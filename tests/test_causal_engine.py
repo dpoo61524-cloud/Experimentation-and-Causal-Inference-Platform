@@ -14,6 +14,7 @@ from causal_engine import (
     validate_causal_data,
     estimate_unadjusted_ate,
     estimate_unadjusted_ate_with_uncertainty,
+    estimate_regression_adjusted_ate,
 )
 
 
@@ -853,3 +854,274 @@ def test_unadjusted_ate_interpretation_disclaimer():
     # Do not claim that interval removes confounding or proves causality
     assert "confounding" in res["assumptions"].lower()
     assert "confounding" in res["interpretation"].lower()
+
+
+# ============================================================================
+# 9. Regression-Adjusted Treatment Effect Estimation Tests
+# ============================================================================
+
+def test_regression_adjusted_ate_known_synthetic_dataset():
+    """Verify regression-adjusted ATE against an independently calculable synthetic linear dataset.
+
+    Data generation:
+    Y = 10.0 + 3.0 * T + 2.0 * X
+    Confounder X: [1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0]
+    Treatment T:  [  1,   1,   1,   1,   0,   0,   0,   0]
+    Treated Y: [15.0, 17.0, 19.0, 21.0] (mean = 18.0)
+    Control Y: [12.0, 14.0, 16.0, 18.0] (mean = 15.0)
+    Expected Adjusted ATE: 3.0 (true coefficient of T).
+    """
+    X_vals = [1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0]
+    T_vals = [1, 1, 1, 1, 0, 0, 0, 0]
+    Y_vals = [10.0 + 3.0 * t + 2.0 * x for t, x in zip(T_vals, X_vals)]
+
+    df = pd.DataFrame({"t": T_vals, "x": X_vals, "y": Y_vals})
+
+    res = estimate_regression_adjusted_ate(
+        data=df,
+        treatment_col="t",
+        outcome_col="y",
+        confounder_cols=["x"],
+    )
+
+    assert res["estimator"] == "regression_adjusted_ate"
+    assert res["adjusted_ate"] == pytest.approx(3.0)
+    assert res["ate"] == pytest.approx(3.0)
+    assert res["unadjusted_ate"] == pytest.approx(3.0)
+    assert res["raw_difference"] == pytest.approx(3.0)
+    assert res["mean_outcome_treated"] == pytest.approx(18.0)
+    assert res["mean_outcome_control"] == pytest.approx(15.0)
+    assert res["mean_predicted_treated"] == pytest.approx(18.0)
+    assert res["mean_predicted_control"] == pytest.approx(15.0)
+    assert res["r_squared"] == pytest.approx(1.0)
+    assert res["n_total"] == 8
+    assert res["n_treated"] == 4
+    assert res["n_control"] == 4
+
+
+def test_regression_adjusted_ate_numeric_and_categorical_confounders():
+    """Verify regression adjustment with both continuous numeric and categorical confounders."""
+    # Outcome equation: Y = 5.0 + 4.0 * T + 2.0 * age + 10.0 * (city == 'NYC')
+    data = [
+        {"grp": 1, "age": 20, "city": "NYC", "outcome": 5.0 + 4.0 + 40.0 + 10.0},
+        {"grp": 1, "age": 30, "city": "LA",  "outcome": 5.0 + 4.0 + 60.0 + 0.0},
+        {"grp": 1, "age": 40, "city": "NYC", "outcome": 5.0 + 4.0 + 80.0 + 10.0},
+        {"grp": 1, "age": 25, "city": "CHI", "outcome": 5.0 + 4.0 + 50.0 + 0.0},
+        {"grp": 0, "age": 20, "city": "NYC", "outcome": 5.0 + 0.0 + 40.0 + 10.0},
+        {"grp": 0, "age": 30, "city": "LA",  "outcome": 5.0 + 0.0 + 60.0 + 0.0},
+        {"grp": 0, "age": 40, "city": "NYC", "outcome": 5.0 + 0.0 + 80.0 + 10.0},
+        {"grp": 0, "age": 25, "city": "CHI", "outcome": 5.0 + 0.0 + 50.0 + 0.0},
+    ]
+    df = pd.DataFrame(data)
+
+    res = estimate_regression_adjusted_ate(
+        data=df,
+        treatment_col="grp",
+        outcome_col="outcome",
+        confounder_cols=["age", "city"],
+    )
+
+    assert res["adjusted_ate"] == pytest.approx(4.0)
+    assert res["numeric_confounders"] == ["age"]
+    assert res["categorical_confounders"] == ["city"]
+    assert any("city" in col for col in res["model_features"])
+    assert res["n_total"] == 8
+    assert res["n_treated"] == 4
+    assert res["n_control"] == 4
+
+
+def test_regression_adjusted_ate_treated_minus_control_direction():
+    """Verify that reported effect is strictly treated minus control for positive and negative effects."""
+    # Positive effect: T=1 increases Y by +5
+    df_pos = pd.DataFrame({
+        "t": [1, 1, 1, 0, 0, 0],
+        "x": [1, 2, 3, 1, 2, 3],
+        "y": [15, 17, 19, 10, 12, 14],
+    })
+    res_pos = estimate_regression_adjusted_ate(df_pos, "t", "y", ["x"])
+    assert res_pos["adjusted_ate"] == pytest.approx(5.0)
+
+    # Negative effect: T=1 decreases Y by -5
+    df_neg = pd.DataFrame({
+        "t": [1, 1, 1, 0, 0, 0],
+        "x": [1, 2, 3, 1, 2, 3],
+        "y": [5, 7, 9, 10, 12, 14],
+    })
+    res_neg = estimate_regression_adjusted_ate(df_neg, "t", "y", ["x"])
+    assert res_neg["adjusted_ate"] == pytest.approx(-5.0)
+
+
+def test_regression_adjusted_ate_counts_and_total_sample():
+    """Verify sample size and group count integrity with unequal allocation."""
+    df = pd.DataFrame({
+        "treatment": [1] * 7 + [0] * 3,
+        "covar": [10, 12, 14, 16, 18, 20, 22, 11, 13, 15],
+        "target": [20, 22, 24, 26, 28, 30, 32, 10, 12, 14],
+    })
+    res = estimate_regression_adjusted_ate(df, "treatment", "target", ["covar"])
+    assert res["n_total"] == 10
+    assert res["n_treated"] == 7
+    assert res["n_control"] == 3
+    assert res["n_untreated"] == 3
+
+
+def test_regression_adjusted_ate_custom_treatment_labels():
+    """Verify regression adjustment with explicit custom string labels for treatment and control."""
+    df = pd.DataFrame({
+        "group": ["Active_Drug", "Active_Drug", "Active_Drug", "Placebo", "Placebo", "Placebo"],
+        "baseline_score": [50, 60, 70, 50, 60, 70],
+        "final_score": [80, 90, 100, 65, 75, 85],
+    })
+
+    res = estimate_regression_adjusted_ate(
+        data=df,
+        treatment_col="group",
+        outcome_col="final_score",
+        confounder_cols=["baseline_score"],
+        treated_value="Active_Drug",
+        untreated_value="Placebo",
+    )
+
+    assert res["treated_value"] == "Active_Drug"
+    assert res["control_value"] == "Placebo"
+    assert res["untreated_value"] == "Placebo"
+    assert res["adjusted_ate"] == pytest.approx(15.0)
+
+
+def test_regression_adjusted_ate_missing_data_policy():
+    """Verify that drop_missing=False rejects missing values while drop_missing=True drops rows and tracks count."""
+    df_missing = pd.DataFrame({
+        "t": [1, 1, 0, 0, 1, 0],
+        "x": [10, np.nan, 20, 25, 15, 30],
+        "y": [100, 110, 80, np.nan, 105, 85],
+    })
+
+    # Default: raises ValueError
+    with pytest.raises(ValueError, match="Dataset contains missing values"):
+        estimate_regression_adjusted_ate(df_missing, "t", "y", ["x"], drop_missing=False)
+
+    # Explicit drop: drops rows with NaNs (rows 1 and 3)
+    res = estimate_regression_adjusted_ate(df_missing, "t", "y", ["x"], drop_missing=True)
+    assert res["rows_dropped"] == 2
+    assert res["n_total"] == 4
+    assert res["n_treated"] == 2
+    assert res["n_control"] == 2
+    assert isinstance(res["adjusted_ate"], float)
+
+
+def test_regression_adjusted_ate_missing_confounder_columns():
+    """Verify ValueError when requested confounder columns are absent from the dataset."""
+    df = pd.DataFrame({"t": [1, 0, 1, 0], "y": [1, 2, 3, 4], "age": [20, 30, 40, 50]})
+    with pytest.raises(ValueError, match="Confounder column 'income' not found in dataset"):
+        estimate_regression_adjusted_ate(df, "t", "y", ["age", "income"])
+
+
+def test_regression_adjusted_ate_empty_confounder_lists_rejected():
+    """Verify that missing or empty confounder specifications raise clear errors directing to unadjusted ATE."""
+    df = pd.DataFrame({"t": [1, 0, 1, 0], "y": [1.0, 2.0, 3.0, 4.0]})
+
+    with pytest.raises(ValueError, match="requires at least one confounder column.*estimate_unadjusted_ate"):
+        estimate_regression_adjusted_ate(df, "t", "y", confounder_cols=None)
+
+    with pytest.raises(ValueError, match="requires at least one confounder column.*estimate_unadjusted_ate"):
+        estimate_regression_adjusted_ate(df, "t", "y", confounder_cols=[])
+
+    with pytest.raises(ValueError, match="requires at least one confounder column.*estimate_unadjusted_ate"):
+        estimate_regression_adjusted_ate(df, "t", "y", confounder_cols=())
+
+
+def test_regression_adjusted_ate_invalid_treatment_and_outcome_inputs():
+    """Verify that invalid treatment structures and non-numeric outcomes are rejected."""
+    # Ternary treatment
+    df_ternary = pd.DataFrame({"t": [0, 1, 2, 0, 1, 2], "y": [1, 2, 3, 4, 5, 6], "x": [1, 2, 3, 4, 5, 6]})
+    with pytest.raises(ValueError, match="must be binary"):
+        estimate_regression_adjusted_ate(df_ternary, "t", "y", ["x"])
+
+    # Non-numeric string outcome
+    df_str_y = pd.DataFrame({"t": [1, 1, 0, 0], "y": ["good", "bad", "ok", "bad"], "x": [1, 2, 3, 4]})
+    with pytest.raises(ValueError, match="contains non-numeric values"):
+        estimate_regression_adjusted_ate(df_str_y, "t", "y", ["x"])
+
+    # Boolean outcome
+    df_bool_y = pd.DataFrame({"t": [1, 1, 0, 0], "y": [True, False, True, False], "x": [1, 2, 3, 4]})
+    with pytest.raises(ValueError, match="must be numeric, but contains boolean values"):
+        estimate_regression_adjusted_ate(df_bool_y, "t", "y", ["x"])
+
+    # Infinite outcome
+    df_inf_y = pd.DataFrame({"t": [1, 1, 0, 0], "y": [10.0, np.inf, 5.0, 6.0], "x": [1, 2, 3, 4]})
+    with pytest.raises(ValueError, match="contains infinite values"):
+        estimate_regression_adjusted_ate(df_inf_y, "t", "y", ["x"])
+
+
+def test_regression_adjusted_ate_constant_confounders_and_insufficient_data():
+    """Verify rejection of zero-variance confounders and insufficient sample sizes."""
+    # Constant confounder (zero variance)
+    df_const_x = pd.DataFrame({"t": [1, 1, 0, 0], "y": [10, 12, 6, 8], "const_x": [99, 99, 99, 99]})
+    with pytest.raises(ValueError, match="has zero variance"):
+        estimate_regression_adjusted_ate(df_const_x, "t", "y", ["const_x"])
+
+    # Insufficient data: 2 observations for 4 parameters (const, t, x1, x2)
+    df_few = pd.DataFrame({"t": [1, 0], "y": [10.0, 6.0], "x1": [1.0, 2.0], "x2": [3.0, 4.0]})
+    with pytest.raises(ValueError, match="Insufficient observations to fit regression adjustment model"):
+        estimate_regression_adjusted_ate(df_few, "t", "y", ["x1", "x2"])
+
+
+def test_regression_adjusted_ate_reproducible_finite_results():
+    """Verify that running the estimator on deterministic data yields identical, finite results."""
+    df = pd.DataFrame({
+        "t": [1, 1, 1, 0, 0, 0],
+        "x": [1.5, 2.5, 3.5, 1.2, 2.2, 3.2],
+        "y": [12.0, 15.0, 18.0, 8.0, 11.0, 14.0],
+    })
+
+    res1 = estimate_regression_adjusted_ate(df, "t", "y", ["x"])
+    res2 = estimate_regression_adjusted_ate(df, "t", "y", ["x"])
+
+    assert np.isfinite(res1["adjusted_ate"])
+    assert res1["adjusted_ate"] == res2["adjusted_ate"]
+    assert res1["model_features"] == res2["model_features"]
+
+
+def test_regression_adjusted_ate_differs_from_unadjusted_under_confounding():
+    """Demonstrate that regression adjustment differs from the raw difference in means under confounding.
+
+    Observational scenario with treatment selection bias:
+    - Higher baseline covariate X heavily increases outcome Y: Y = 5.0 + 4.0 * T + 10.0 * X
+    - Units with higher X are systematically assigned to treatment (T=1: X in [5, 6, 7]; T=0: X in [1, 2, 3])
+    - True causal effect of T = 4.0
+    - Raw unadjusted mean difference is inflated by confounding:
+      Treated mean = 5 + 4 + 10 * 6 = 69.0
+      Control mean = 5 + 0 + 10 * 2 = 25.0
+      Raw unadjusted difference = 69.0 - 25.0 = 44.0 (heavily biased by 40.0)
+    - Regression-adjusted ATE recovers true effect = 4.0!
+    """
+    treated_X = [5.0, 6.0, 7.0]
+    control_X = [1.0, 2.0, 3.0]
+
+    treated_Y = [5.0 + 4.0 + 10.0 * x for x in treated_X]  # [59.0, 69.0, 79.0] -> mean = 69.0
+    control_Y = [5.0 + 0.0 + 10.0 * x for x in control_X]  # [15.0, 25.0, 35.0] -> mean = 25.0
+
+    df_confounded = pd.DataFrame({
+        "treatment": [1, 1, 1, 0, 0, 0],
+        "covariate": treated_X + control_X,
+        "outcome": treated_Y + control_Y,
+    })
+
+    res = estimate_regression_adjusted_ate(
+        data=df_confounded,
+        treatment_col="treatment",
+        outcome_col="outcome",
+        confounder_cols=["covariate"],
+    )
+
+    # Raw unadjusted difference in means is severely confounded (44.0)
+    assert res["unadjusted_ate"] == pytest.approx(44.0)
+    assert res["raw_difference"] == pytest.approx(44.0)
+
+    # Regression adjustment controls for covariate and accurately isolates the true effect (4.0)
+    assert res["adjusted_ate"] == pytest.approx(4.0)
+    assert res["adjusted_ate"] != pytest.approx(res["unadjusted_ate"])
+
+    # Disclaimers present in output
+    assert "unmeasured confounding" in res["assumptions"].lower()
+    assert "counterfactual" in res["interpretation"].lower()

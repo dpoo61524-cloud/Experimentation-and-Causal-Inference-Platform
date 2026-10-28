@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import pandas as pd
 import scipy.stats as stats
+import statsmodels.api as sm
 
 
 def _to_dataframe(data: Any) -> pd.DataFrame:
@@ -775,3 +776,286 @@ def estimate_unadjusted_ate_with_uncertainty(
         compute_ci=True,
         raise_on_zero_variance=raise_on_zero_variance,
     )
+
+
+def estimate_regression_adjusted_ate(
+    data: Any,
+    treatment_col: str,
+    outcome_col: str,
+    confounder_cols: Sequence[str],
+    treated_value: Optional[Any] = None,
+    untreated_value: Optional[Any] = None,
+    drop_missing: bool = False,
+) -> Dict[str, Any]:
+    """Estimate the Average Treatment Effect (ATE) using regression adjustment (G-computation).
+
+    Methodology & Causal Identification:
+    ------------------------------------
+    Regression adjustment (also known as the parametric G-formula or standardization)
+    estimates the Average Treatment Effect by modeling the conditional expectation of the
+    outcome given treatment and observed baseline confounders:
+
+        E[Y | T, X] = f(T, X; beta)
+
+    1. Model Fitting:
+       An Ordinary Least Squares (OLS) regression model is fitted on the validated observations:
+           Y_i = beta_0 + beta_T * T_i + sum_j beta_j * X_{ij} + epsilon_i
+       where categorical confounders are one-hot encoded with the baseline level dropped.
+
+    2. Counterfactual Predictions:
+       Using the single fitted regression model, two counterfactual predictions are generated
+       for EVERY observed unit i:
+       - Y_hat_i(1): predicted outcome setting unit i's treatment indicator to treated (T = 1),
+         holding all their observed confounders X_i constant.
+       - Y_hat_i(0): predicted outcome setting unit i's treatment indicator to control (T = 0),
+         holding all their observed confounders X_i constant.
+
+    3. Marginal Contrast (G-computation):
+       The individual counterfactual treatment effects are:
+           tau_hat_i = Y_hat_i(1) - Y_hat_i(0)
+       The sample Average Treatment Effect (ATE) is the empirical mean of these contrasts:
+           ATE_adjusted = (1 / N) * sum_{i=1}^N (Y_hat_i(1) - Y_hat_i(0))
+       The contrast is strictly computed as treated minus control.
+
+    Identification Assumptions & Limitations:
+    -----------------------------------------
+    - Conditional Exchangeability (No Unmeasured Confounding):
+      Potential outcomes are independent of treatment assignment given observed confounders:
+          (Y(1), Y(0)) ⫫ T | X
+      Regression adjustment controls ONLY for the observed, included confounders. Any unmeasured
+      or poorly measured confounders will leave residual confounding bias.
+    - Positivity (Common Support / Overlap):
+      Every subpopulation defined by X must have a non-zero probability of receiving either
+      treatment status: 0 < P(T = 1 | X = x) < 1.
+    - Model Specification:
+      The parametric outcome model is assumed to correctly approximate the true conditional
+      expectation function. Severe model misspecification (e.g., omitted non-linearities)
+      can introduce bias.
+    - SUTVA (Stable Unit Treatment Value Assumption):
+      No interference between units (one unit's treatment assignment does not affect another's
+      outcome) and no hidden variations of treatment.
+    - Note on Constant Effects: This method estimates the population average contrast. While an
+      additive linear model produces a uniform contrast across units, G-computation averages
+      over the empirical distribution of covariates in the study sample.
+
+    Parameters:
+    -----------
+    data : pd.DataFrame, Dict[str, Sequence], or List[Dict[str, Any]]
+        The tabular dataset to analyze.
+    treatment_col : str
+        Name of the binary treatment column.
+    outcome_col : str
+        Name of the numeric outcome column.
+    confounder_cols : Sequence[str]
+        Names of observed confounder/covariate columns to adjust for. At least one confounder
+        column is required.
+    treated_value : Any, optional
+        Label identifying the treated condition. If None, inferred automatically for binary data.
+    untreated_value : Any, optional
+        Label identifying the control condition. If None, inferred automatically for binary data.
+    drop_missing : bool, default False
+        Explicit missing data policy (reused from validate_causal_data):
+        - If False (default): raises ValueError if missing values exist in analysis columns.
+        - If True: drops rows with missing values and tracks the count.
+
+    Returns:
+    --------
+    Dict[str, Any]
+        Structured dictionary containing:
+        - 'estimator': 'regression_adjusted_ate'
+        - 'adjusted_ate': Estimated regression-adjusted ATE (treated minus control)
+        - 'ate': Alias for 'adjusted_ate'
+        - 'unadjusted_ate': Unadjusted difference in sample means (treated minus control)
+        - 'raw_difference': Alias for 'unadjusted_ate'
+        - 'difference_in_means': Alias for 'unadjusted_ate'
+        - 'mean_outcome_treated': Observed sample mean outcome in the treated group
+        - 'mean_outcome_control': Observed sample mean outcome in the control group
+        - 'outcome_mean_treated': Alias for 'mean_outcome_treated'
+        - 'outcome_mean_untreated': Alias for 'mean_outcome_control'
+        - 'mean_predicted_treated': Average counterfactual predicted outcome under treatment
+        - 'mean_predicted_control': Average counterfactual predicted outcome under control
+        - 'n_total': Total number of validated observations used in model fitting
+        - 'n_treated': Count of treated observations
+        - 'n_control': Count of control observations
+        - 'n_untreated': Alias for 'n_control'
+        - 'treatment_col': Treatment column name
+        - 'outcome_col': Outcome column name
+        - 'confounder_cols': List of validated confounder column names
+        - 'numeric_confounders': List of numeric confounder column names
+        - 'categorical_confounders': List of categorical confounder column names
+        - 'model_features': Feature column names included in the design matrix
+        - 'treated_value': Value representing the treated condition
+        - 'control_value': Value representing the control condition
+        - 'untreated_value': Alias for 'control_value'
+        - 'rows_dropped': Number of rows dropped due to missing data (0 if drop_missing=False)
+        - 'r_squared': Coefficient of determination ($R^2$) of the fitted outcome model
+        - 'interpretation': Concise interpretation of the adjusted estimate vs raw difference
+        - 'assumptions': Educational explanation of identifying assumptions and confounding limitations
+
+    Raises:
+    -------
+    ValueError:
+        If no confounders are provided, or if data validation fails (missing columns, non-binary
+        treatment, non-numeric outcome, constant confounders, missing data policy violation,
+        or insufficient observations for regression model fitting).
+    """
+    # 1. Require at least one confounder column
+    if confounder_cols is None:
+        raise ValueError(
+            "Regression-adjusted ATE estimation requires at least one confounder column. "
+            "If no confounders are available, use estimate_unadjusted_ate(...) instead."
+        )
+    if not isinstance(confounder_cols, (list, tuple)):
+        raise ValueError(
+            f"confounder_cols must be a list or tuple of column names, got {type(confounder_cols).__name__}."
+        )
+    if len(confounder_cols) == 0:
+        raise ValueError(
+            "Regression-adjusted ATE estimation requires at least one confounder column. "
+            "If no confounders are available, use estimate_unadjusted_ate(...) instead."
+        )
+
+    # 2. Reuse validate_causal_data for comprehensive validation
+    v = validate_causal_data(
+        data=data,
+        treatment_col=treatment_col,
+        outcome_col=outcome_col,
+        confounder_cols=confounder_cols,
+        treated_value=treated_value,
+        untreated_value=untreated_value,
+        drop_missing=drop_missing,
+    )
+
+    df_validated = v["validated_data"]
+    treatment_series = df_validated[v["treatment_col"]]
+    numeric_outcomes = pd.to_numeric(df_validated[v["outcome_col"]], errors="raise").astype(float)
+
+    treated_label = v["treated_value"]
+    control_label = v["untreated_value"]
+    t_binary = (treatment_series == treated_label).astype(float)
+
+    clean_confounders = v["confounder_cols"]
+    numeric_confounders = v["numeric_confounders"]
+    categorical_confounders = v["categorical_confounders"]
+
+    confounders_df = df_validated[clean_confounders].copy()
+
+    # 3. Preprocess Confounders (One-Hot Encoding for Categoricals with drop_first=True)
+    if categorical_confounders:
+        X_conf = pd.get_dummies(
+            confounders_df,
+            columns=categorical_confounders,
+            drop_first=True,
+            dtype=float,
+        )
+    else:
+        X_conf = confounders_df.astype(float)
+
+    # 4. Construct Design Matrix with Treatment Indicator and Intercept
+    X_design = X_conf.copy()
+    X_design.insert(0, "treatment_indicator", t_binary)
+    X_design = sm.add_constant(X_design, prepend=True, has_constant="add")
+
+    n_obs = len(df_validated)
+    n_features = X_design.shape[1]
+
+    if n_obs < n_features:
+        raise ValueError(
+            f"Insufficient observations to fit regression adjustment model: "
+            f"dataset contains {n_obs} observation(s), but model requires at least {n_features} "
+            f"observations for {n_features} parameters (including intercept, treatment, and confounders)."
+        )
+
+    # 5. Fit OLS Regression Model
+    try:
+        model = sm.OLS(numeric_outcomes, X_design).fit()
+    except Exception as exc:
+        raise ValueError(f"Failed to fit regression adjustment model: {exc}")
+
+    if np.isnan(model.params).any():
+        raise ValueError(
+            "Regression model fitting resulted in NaN coefficients (likely due to severe collinearity or rank deficiency)."
+        )
+
+    # 6. Counterfactual Predictions (G-computation)
+    # Counterfactual 1: Every unit set to treated condition (T = 1.0)
+    X_treated = X_design.copy()
+    X_treated["treatment_indicator"] = 1.0
+    pred_treated = model.predict(X_treated)
+
+    # Counterfactual 0: Every unit set to control condition (T = 0.0)
+    X_control = X_design.copy()
+    X_control["treatment_indicator"] = 0.0
+    pred_control = model.predict(X_control)
+
+    if (
+        np.isnan(pred_treated).any()
+        or np.isnan(pred_control).any()
+        or np.isinf(pred_treated).any()
+        or np.isinf(pred_control).any()
+    ):
+        raise ValueError("Regression model generated non-finite counterfactual predictions.")
+
+    # 7. Compute Individual Contrasts and Adjusted ATE
+    individual_contrasts = pred_treated - pred_control
+    adjusted_ate = float(np.mean(individual_contrasts))
+    mean_pred_treated = float(np.mean(pred_treated))
+    mean_pred_control = float(np.mean(pred_control))
+
+    raw_diff = float(v["raw_difference"])
+    r_squared = (
+        float(model.rsquared)
+        if hasattr(model, "rsquared") and model.rsquared is not None
+        else None
+    )
+
+    assumptions_text = (
+        "Regression adjustment (G-computation) identifies the Average Treatment Effect (ATE) under "
+        "four primary identification assumptions: (1) Conditional Exchangeability / No Unmeasured Confounding "
+        "(potential outcomes are conditionally independent of treatment given observed confounders: (Y(1), Y(0)) ⫫ T | X); "
+        "(2) Positivity / Overlap (every subpopulation has a non-zero probability of receiving both treatment conditions: "
+        "0 < P(T=1 | X=x) < 1); (3) Correct Model Specification (the linear outcome model accurately reflects the true "
+        "conditional expectation function E[Y | T, X]); and (4) SUTVA (no interference between units and well-defined "
+        "treatment versions). Important: Regression adjustment controls ONLY for observed, modeled covariates. "
+        "It does NOT guarantee causality if unmeasured confounding, severe model misspecification, or lack of overlap exists."
+    )
+
+    interpretation_text = (
+        f"The regression-adjusted ATE is {adjusted_ate:.4f} (unadjusted difference in means: {raw_diff:.4f}). "
+        "This reflects the average counterfactual contrast: the expected difference in outcome if the entire sample "
+        "were assigned to the treated condition versus the control condition, adjusting for observed confounders "
+        f"({', '.join(clean_confounders)}). This estimator controls for observed covariates under a linear model; "
+        "it does not remove unmeasured confounding or prove causality in observational settings."
+    )
+
+    return {
+        "estimator": "regression_adjusted_ate",
+        "adjusted_ate": adjusted_ate,
+        "ate": adjusted_ate,
+        "unadjusted_ate": raw_diff,
+        "raw_difference": raw_diff,
+        "difference_in_means": raw_diff,
+        "mean_outcome_treated": float(v["outcome_mean_treated"]),
+        "mean_outcome_control": float(v["outcome_mean_untreated"]),
+        "outcome_mean_treated": float(v["outcome_mean_treated"]),
+        "outcome_mean_untreated": float(v["outcome_mean_untreated"]),
+        "mean_predicted_treated": mean_pred_treated,
+        "mean_predicted_control": mean_pred_control,
+        "n_total": int(v["n_total"]),
+        "n_treated": int(v["n_treated"]),
+        "n_control": int(v["n_untreated"]),
+        "n_untreated": int(v["n_untreated"]),
+        "treatment_col": v["treatment_col"],
+        "outcome_col": v["outcome_col"],
+        "confounder_cols": clean_confounders,
+        "numeric_confounders": numeric_confounders,
+        "categorical_confounders": categorical_confounders,
+        "model_features": list(X_design.columns),
+        "treated_value": treated_label,
+        "control_value": control_label,
+        "untreated_value": control_label,
+        "rows_dropped": int(v["rows_dropped"]),
+        "r_squared": r_squared,
+        "interpretation": interpretation_text,
+        "assumptions": assumptions_text,
+    }
