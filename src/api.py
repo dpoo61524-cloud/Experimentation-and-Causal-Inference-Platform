@@ -2367,6 +2367,264 @@ async def iptw_ate_endpoint(
         )
 
 
+class DatasetIPTWATERequest(BaseModel):
+    treatment_col: str = Field(
+        ...,
+        description="Name of the binary treatment indicator column in the dataset.",
+        examples=["treatment"],
+    )
+    outcome_col: str = Field(
+        ...,
+        description="Name of the numeric outcome column in the dataset.",
+        examples=["outcome"],
+    )
+    confounder_cols: List[str] = Field(
+        ...,
+        description="Non-empty list of observed confounder column names.",
+        examples=[["x", "z"]],
+    )
+    treated_value: Optional[Any] = Field(
+        None,
+        description="Optional label identifying treated observations. Inferred automatically if omitted.",
+        examples=[1],
+    )
+    untreated_value: Optional[Any] = Field(
+        None,
+        description="Optional label identifying control/untreated observations. Inferred automatically if omitted.",
+        examples=[0],
+    )
+    control_value: Optional[Any] = Field(
+        None,
+        description="Alias for untreated_value.",
+        examples=[0],
+    )
+    drop_missing: bool = Field(
+        default=False,
+        description="Whether to explicitly drop rows with missing values across analysis columns. Default is false.",
+        examples=[False],
+    )
+    extreme_weight_threshold: float = Field(
+        default=20.0,
+        description="Diagnostic threshold above which a weight is flagged as extreme.",
+        examples=[20.0],
+    )
+    truncate_weights: bool = Field(
+        default=False,
+        description="Whether to truncate (clip) weights above max_weight. Default is false.",
+        examples=[False],
+    )
+    max_weight: Optional[float] = Field(
+        None,
+        description="Maximum weight threshold used if truncate_weights is true.",
+        examples=[10.0],
+    )
+
+    @field_validator("treatment_col", "outcome_col")
+    @classmethod
+    def validate_column_names(cls, v: Any, info: Any) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError(f"{info.field_name} must be a non-empty string.")
+        return v.strip()
+
+    @field_validator("confounder_cols")
+    @classmethod
+    def validate_confounders(cls, v: Any) -> List[str]:
+        if not isinstance(v, list):
+            raise ValueError("confounder_cols must be a list of column names.")
+        if len(v) == 0:
+            raise ValueError("confounder_cols must contain at least one column name.")
+        clean_cols = []
+        for idx, col in enumerate(v):
+            if not isinstance(col, str) or not col.strip():
+                raise ValueError(f"Confounder column at index {idx} must be a non-empty string.")
+            clean_cols.append(col.strip())
+        return clean_cols
+
+    @field_validator("drop_missing", "truncate_weights")
+    @classmethod
+    def validate_booleans(cls, v: Any, info: Any) -> bool:
+        if not isinstance(v, bool):
+            raise ValueError(f"{info.field_name} must be a boolean.")
+        return v
+
+    @field_validator("extreme_weight_threshold", mode="before")
+    @classmethod
+    def validate_extreme_weight_threshold(cls, v: Any) -> float:
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError("extreme_weight_threshold must be a numeric float.")
+        fv = float(v)
+        if math.isnan(fv) or math.isinf(fv) or fv <= 0:
+            raise ValueError("extreme_weight_threshold must be a positive finite number (> 0).")
+        return fv
+
+    @field_validator("max_weight", mode="before")
+    @classmethod
+    def validate_max_weight(cls, v: Any) -> Optional[float]:
+        if v is None:
+            return None
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError("max_weight must be a numeric float.")
+        fv = float(v)
+        if math.isnan(fv) or math.isinf(fv) or fv <= 0:
+            raise ValueError("max_weight must be a positive finite number (> 0).")
+        return fv
+
+    @model_validator(mode="after")
+    def validate_model_consistency(self) -> "DatasetIPTWATERequest":
+        if self.treatment_col == self.outcome_col:
+            raise ValueError(
+                f"treatment_col and outcome_col cannot be the same column ('{self.treatment_col}')."
+            )
+        for col in self.confounder_cols:
+            if col == self.treatment_col:
+                raise ValueError(
+                    f"Confounder column '{col}' cannot also be the treatment column."
+                )
+            if col == self.outcome_col:
+                raise ValueError(
+                    f"Confounder column '{col}' cannot also be the outcome column."
+                )
+        if len(self.confounder_cols) != len(set(self.confounder_cols)):
+            raise ValueError(
+                f"confounder_cols contains duplicate column names: {self.confounder_cols}."
+            )
+        if self.truncate_weights and self.max_weight is not None and self.max_weight <= 0:
+            raise ValueError(
+                f"max_weight must be positive when truncate_weights is enabled, got {self.max_weight}."
+            )
+        return self
+
+
+class DatasetCausalIPTWATEResponse(CausalIPTWATEResponse):
+    dataset_id: str = Field(..., description="Unique opaque dataset identifier")
+    dataset_filename: str = Field(..., description="Original filename of the stored dataset evaluated")
+    total_dataset_rows: int = Field(..., description="Total rows in the stored dataset before dropping missing values")
+
+
+@app.post(
+    "/api/dataset/{dataset_id}/causal/iptw-ate",
+    response_model=DatasetCausalIPTWATEResponse,
+    tags=["Causal Inference", "Datasets"],
+    summary="Estimate IPTW ATE for a stored dataset",
+)
+async def dataset_iptw_ate_endpoint(
+    dataset_id: str,
+    payload: DatasetIPTWATERequest,
+) -> Dict[str, Any]:
+    """Estimate the Average Treatment Effect (ATE) via Inverse Probability of Treatment Weighting (IPTW) for a stored dataset.
+
+    Validates dataset access and column existence, loads only the relevant treatment,
+    outcome, and confounder columns into memory, enforces missing-data policy,
+    fits a logistic propensity score model, calculates unstabilized (and optionally truncated)
+    weights, evaluates Hájek weighted outcome means and effective sample sizes, and measures
+    covariate balance improvements across pre- and post-weighting SMDs.
+    """
+    dataset_meta = default_dataset_manager.get_dataset(dataset_id)
+    if dataset_meta is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Dataset '{dataset_id}' not found or has expired.",
+        )
+
+    file_path = default_dataset_manager.get_dataset_file_path(dataset_id)
+    if file_path is None or not file_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Dataset file for '{dataset_id}' is not available on disk.",
+        )
+
+    available_cols = [c.name for c in dataset_meta.columns]
+    if payload.treatment_col not in available_cols:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=(
+                f"Treatment column '{payload.treatment_col}' not found in dataset. "
+                f"Available columns: {available_cols}"
+            ),
+        )
+    if payload.outcome_col not in available_cols:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=(
+                f"Outcome column '{payload.outcome_col}' not found in dataset. "
+                f"Available columns: {available_cols}"
+            ),
+        )
+    for c_col in payload.confounder_cols:
+        if c_col not in available_cols:
+            raise HTTPException(
+                status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+                detail=(
+                    f"Confounder column '{c_col}' not found in dataset. "
+                    f"Available columns: {available_cols}"
+                ),
+            )
+
+    if dataset_meta.row_count == 0:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail="Dataset is empty (0 rows). Causal inference requires observations in both treatment groups.",
+        )
+
+    cols_to_read = [payload.treatment_col, payload.outcome_col] + payload.confounder_cols
+
+    try:
+        df = pd.read_csv(
+            file_path,
+            usecols=cols_to_read,
+            na_values=list(MISSING_TOKENS),
+            keep_default_na=True,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=f"Failed to read dataset columns: {exc}",
+        )
+
+    if df.empty:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail="Dataset is empty (0 rows). Causal inference requires observations in both treatment groups.",
+        )
+
+    resolved_treated = _coerce_label_to_series_dtype(payload.treated_value, df[payload.treatment_col])
+    untreated_val = payload.untreated_value if payload.untreated_value is not None else payload.control_value
+    resolved_untreated = _coerce_label_to_series_dtype(untreated_val, df[payload.treatment_col])
+
+    try:
+        results = estimate_iptw_ate(
+            data=df,
+            treatment_col=payload.treatment_col,
+            outcome_col=payload.outcome_col,
+            confounder_cols=payload.confounder_cols,
+            treated_value=resolved_treated,
+            untreated_value=resolved_untreated,
+            control_value=resolved_untreated,
+            drop_missing=payload.drop_missing,
+            extreme_weight_threshold=payload.extreme_weight_threshold,
+            truncate_weights=payload.truncate_weights,
+            max_weight=payload.max_weight,
+        )
+        results["dataset_id"] = dataset_id
+        results["dataset_filename"] = dataset_meta.filename
+        results["total_dataset_rows"] = dataset_meta.row_count
+        results["weighted_mean_treated"] = results["weighted_mean_outcome_treated"]
+        results["weighted_mean_control"] = results["weighted_mean_outcome_control"]
+        results["effective_sample_size_treated"] = results["ess_treated"]
+        results["effective_sample_size_control"] = results["ess_control"]
+        results["effective_sample_size_total"] = results["ess_total"]
+        results["covariate_balance"] = {
+            "before": results["covariate_balance_before"],
+            "after": results["covariate_balance_after"],
+            "summary": results["balance_summary"],
+        }
+        return _sanitize_for_json(results)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=str(exc),
+        )
+
 
 class CausalDifferenceInDifferencesRequest(BaseModel):
     data: List[Dict[str, Any]] = Field(

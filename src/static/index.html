@@ -32,7 +32,7 @@
 
         <!-- Stage Notice Banner -->
         <div class="info-banner" role="region" aria-label="Development Notice">
-            <strong>Stage 7.5A Active:</strong> Dataset ingestion, schema inspection, Unadjusted ATE, Regression-Adjusted ATE, and Propensity Score Estimation with Overlap Diagnostics are fully operational. All statistical calculations are executed by the FastAPI causal engine.
+            <strong>Stage 7.5B Active:</strong> Dataset ingestion, schema inspection, Unadjusted ATE, Regression-Adjusted ATE, Propensity Score Estimation, and Inverse Probability of Treatment Weighting (IPTW) ATE are fully operational. All statistical calculations are executed by the FastAPI causal engine.
         </div>
 
         <!-- Section 1: Dataset Ingestion & Schema Inspector -->
@@ -672,10 +672,231 @@
             </div>
         </section>
 
-        <!-- Section 5: Available Causal Analysis Methods -->
+        <!-- Section 5: Causal Analysis — Inverse Probability of Treatment Weighting (IPTW) ATE -->
+        <section id="iptw-analysis-section" class="section-card" aria-labelledby="iptw-analysis-heading">
+            <div class="section-header">
+                <h3 id="iptw-analysis-heading">5. Causal Analysis: Inverse Probability of Treatment Weighting (IPTW) ATE</h3>
+                <p>Estimate the Average Treatment Effect (ATE) by weighting observations with inverse propensity scores using the H&aacute;jek estimator to correct for observable confounding.</p>
+            </div>
+
+            <!-- Status Banner for IPTW Analysis -->
+            <div id="iptw-status-banner" class="status-indicator" role="status" aria-live="polite"></div>
+
+            <!-- Unloaded State Notice -->
+            <div id="iptw-unloaded-notice" class="empty-state">
+                <p>No dataset selected for IPTW analysis. Ingest a CSV dataset or load the Hillstrom benchmark above to enable IPTW estimation.</p>
+            </div>
+
+            <!-- Interactive Analysis Form (Hidden until dataset loaded) -->
+            <div id="iptw-form-container" style="display: none;">
+                <!-- Active Dataset Context Badge -->
+                <div class="active-dataset-meta-box">
+                    <span class="meta-item"><strong>Active Dataset:</strong> <span id="iptw-dataset-name">—</span></span>
+                    <span class="meta-item"><strong>Dataset ID:</strong> <span id="iptw-dataset-id" class="code-id">—</span></span>
+                    <span class="meta-item"><strong>Total Records:</strong> <span id="iptw-dataset-rows">—</span></span>
+                    <span class="meta-item"><strong>Columns:</strong> <span id="iptw-dataset-cols">—</span></span>
+                </div>
+
+                <!-- Educational Notice Banner for IPTW -->
+                <div class="info-banner" style="margin-bottom: 16px; border-left-color: var(--sage-accent);">
+                    <strong>Causal Weighting Mechanism:</strong> IPTW creates a synthetic pseudo-population by assigning weights <code>w = 1 / e(X)</code> to treated units and <code>w = 1 / (1 - e(X))</code> to control units. This balances observed confounders across groups so that treatment assignment is pseudo-randomized.
+                    Causal validity requires <em>conditional exchangeability</em> (no unobserved confounders), <em>positivity</em> (0 &lt; e(X) &lt; 1), and a <em>correctly specified propensity score model</em>. Extreme weights inflate variance; weight truncation trades slight bias for lower variance.
+                </div>
+
+                <form id="iptw-analysis-form" class="causal-analysis-form" onsubmit="return false;">
+                    <div class="form-row-grid">
+                        <!-- Treatment Column Select -->
+                        <div class="form-group">
+                            <label for="iptw-treatment-select">Treatment Column (Binary) <span class="required-star">*</span></label>
+                            <select id="iptw-treatment-select" class="form-select" required>
+                                <option value="">-- Choose treatment column --</option>
+                            </select>
+                            <span class="field-hint">Binary indicator variable modeled as dependent variable in logit regression.</span>
+                        </div>
+
+                        <!-- Outcome Column Select -->
+                        <div class="form-group">
+                            <label for="iptw-outcome-select">Outcome Column (Numeric) <span class="required-star">*</span></label>
+                            <select id="iptw-outcome-select" class="form-select" required>
+                                <option value="">-- Choose outcome column --</option>
+                            </select>
+                            <span class="field-hint">Continuous or numeric metric reweighted to estimate causal effect.</span>
+                        </div>
+                    </div>
+
+                    <!-- Confounders Multi-Selection Checkbox Grid -->
+                    <div class="form-group" style="margin-top: 14px;">
+                        <label>Confounder Columns <span class="required-star">*</span> (Select at least one)</label>
+                        <div id="iptw-confounders-container" class="confounders-checkbox-grid" role="group" aria-label="Select confounder columns for IPTW propensity model">
+                            <!-- Populated dynamically with checkboxes -->
+                        </div>
+                        <span class="field-hint">Observed variables simultaneously affecting treatment assignment and the outcome.</span>
+                    </div>
+
+                    <!-- Weight Truncation & Diagnostic Options -->
+                    <div class="form-row-grid" style="margin-top: 14px;">
+                        <div class="form-group">
+                            <label for="iptw-extreme-weight-threshold-input">Extreme Weight Diagnostic Threshold</label>
+                            <input type="number" id="iptw-extreme-weight-threshold-input" class="form-input" value="20.0" min="1" step="0.5">
+                            <span class="field-hint">Weights exceeding this threshold generate diagnostic stability warnings (default: 20.0).</span>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="iptw-max-weight-input">Maximum Weight (Truncation Cap)</label>
+                            <input type="number" id="iptw-max-weight-input" class="form-input" placeholder="e.g. 10.0" min="1" step="0.5" disabled>
+                            <span class="field-hint">Upper bound cap applied to weights when truncation is enabled.</span>
+                        </div>
+                    </div>
+
+                    <!-- Truncation Toggle Checkbox -->
+                    <div class="form-checkbox-row" style="margin-top: 10px;">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="iptw-truncate-checkbox">
+                            <span><strong>Enable weight truncation (clipping)</strong> (<code>truncate_weights=true</code>)</span>
+                        </label>
+                        <p class="field-hint" style="margin-left: 23px; margin-top: 2px;">
+                            Clips weights exceeding the Maximum Weight cap to stabilize estimator variance under near-positivity violations.
+                        </p>
+                    </div>
+
+                    <!-- Optional Labels Row -->
+                    <div class="form-row-grid" style="margin-top: 14px;">
+                        <div class="form-group">
+                            <label for="iptw-treated-val-input">Treated Value Label (Optional)</label>
+                            <input type="text" id="iptw-treated-val-input" class="form-input" placeholder="Auto-inferred if empty (e.g. 1)">
+                            <span class="field-hint">Leave blank to auto-infer from binary values.</span>
+                        </div>
+                        <div class="form-group">
+                            <label for="iptw-untreated-val-input">Control / Untreated Value Label (Optional)</label>
+                            <input type="text" id="iptw-untreated-val-input" class="form-input" placeholder="Auto-inferred if empty (e.g. 0)">
+                            <span class="field-hint">Leave blank to auto-infer from binary values.</span>
+                        </div>
+                    </div>
+
+                    <!-- Missing Data Checkbox -->
+                    <div class="form-checkbox-row">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="iptw-drop-missing-checkbox">
+                            <span><strong>Explicitly drop rows with missing values</strong> (<code>drop_missing=true</code>)</span>
+                        </label>
+                        <p class="field-hint" style="margin-left: 23px; margin-top: 2px;">
+                            When unchecked (default), estimation fails cleanly if missing values exist in the chosen model columns.
+                        </p>
+                    </div>
+
+                    <div class="form-actions-row">
+                        <button type="submit" id="run-iptw-btn" class="btn btn-primary" disabled>
+                            Estimate IPTW Treatment Effect
+                        </button>
+                    </div>
+                </form>
+
+                <!-- Results Display Panel (Hidden until estimation succeeds) -->
+                <div id="iptw-results-panel" style="display: none;">
+                    <div class="results-header-block">
+                        <h4 style="font-size: 15px; font-weight: 600; color: var(--primary-charcoal); margin-bottom: 4px;">
+                            Inverse Probability of Treatment Weighting (IPTW) Results
+                        </h4>
+                        <p class="table-footnote">
+                            Estimated using the H&aacute;jek normalized weighted estimator with unstabilized propensity weights <code>w = 1 / P(T | X)</code>.
+                        </p>
+                    </div>
+
+                    <!-- Dataset & Sample Accounting Banner -->
+                    <div class="accounting-card">
+                        <span class="acc-item"><strong>Evaluated Dataset:</strong> <span id="res-iptw-dataset-name">—</span></span>
+                        <span class="acc-item"><strong>Total Stored Rows:</strong> <span id="res-iptw-total-rows">—</span></span>
+                        <span class="acc-item"><strong>Evaluated Observations:</strong> <span id="res-iptw-eval-rows">—</span></span>
+                        <span class="acc-item"><strong>Rows Dropped (Missing):</strong> <span id="res-iptw-dropped-rows">—</span></span>
+                    </div>
+
+                    <!-- Primary Statistics KPI Grid -->
+                    <div class="results-kpi-grid">
+                        <div class="res-kpi-card highlight-card">
+                            <div class="res-kpi-label">IPTW ATE Estimate</div>
+                            <div id="res-iptw-ate" class="res-kpi-val">—</div>
+                            <div class="res-kpi-sub">Weighted Counterfactual Difference (&mu;&#770;&#8321; &minus; &mu;&#770;&#8320;)</div>
+                        </div>
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Unadjusted ATE (Benchmark)</div>
+                            <div id="res-iptw-unadjusted-ate" class="res-kpi-val">—</div>
+                            <div class="res-kpi-sub">Raw difference in sample means</div>
+                        </div>
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Weighted Treated Mean (&mu;&#770;&#8321;)</div>
+                            <div id="res-iptw-mean-treated" class="res-kpi-val">—</div>
+                            <div id="res-iptw-treated-sub" class="res-kpi-sub">Treated group outcome mean</div>
+                        </div>
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Weighted Control Mean (&mu;&#770;&#8320;)</div>
+                            <div id="res-iptw-mean-control" class="res-kpi-val">—</div>
+                            <div id="res-iptw-control-sub" class="res-kpi-sub">Control group outcome mean</div>
+                        </div>
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Effective Sample Size (Kish)</div>
+                            <div id="res-iptw-ess-total" class="res-kpi-val">—</div>
+                            <div id="res-iptw-ess-sub" class="res-kpi-sub">Total ESS (Treated / Control)</div>
+                        </div>
+                        <div class="res-kpi-card">
+                            <div class="res-kpi-label">Weight Distribution &amp; Clamping</div>
+                            <div id="res-iptw-weight-summary" class="res-kpi-val" style="font-size: 14px;">—</div>
+                            <div id="res-iptw-weight-sub" class="res-kpi-sub">Min / Mean / Max weights</div>
+                        </div>
+                    </div>
+
+                    <!-- Covariate Balance Comparison Table (Before vs After Weighting) -->
+                    <div style="margin-bottom: 16px;">
+                        <h5 style="font-size: 13px; font-weight: 600; color: var(--primary-charcoal); margin-bottom: 6px;">
+                            Covariate Balance Diagnostics (Standardized Mean Differences Before vs After Weighting)
+                        </h5>
+                        <p class="table-footnote" style="margin-bottom: 8px;">
+                            Standardized Mean Difference (SMD) quantifies covariate imbalance. Absolute SMD &le; 0.10 indicates acceptable balance. Successful weighting reduces |SMD| toward zero.
+                        </p>
+                        <div class="table-container" style="max-height: 260px; overflow-y: auto;">
+                            <table class="data-table" id="iptw-balance-table" aria-label="IPTW Covariate Balance Table">
+                                <thead>
+                                    <tr>
+                                        <th>Confounder</th>
+                                        <th>Type</th>
+                                        <th>Before Weighting SMD</th>
+                                        <th>After Weighting SMD</th>
+                                        <th>SMD Change (&Delta;)</th>
+                                        <th>Post-Weighting Balance Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="iptw-balance-tbody">
+                                    <!-- Populated dynamically -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Warnings & Diagnostic Notes (Conditional) -->
+                    <div id="iptw-warnings-card" class="info-banner" style="display: none; border-left-color: #D97706; background-color: #FFFBEB; margin-bottom: 16px;">
+                        <strong style="color: #92400E;">Diagnostic Warnings:</strong>
+                        <ul id="iptw-warnings-list" style="margin: 6px 0 0 18px; padding: 0; color: #78350F; font-size: 13px;">
+                            <!-- Populated dynamically -->
+                        </ul>
+                    </div>
+
+                    <!-- Interpretation & Assumptions Text Blocks -->
+                    <div class="interpretation-block">
+                        <h5>Statistical Interpretation</h5>
+                        <p id="res-iptw-interpretation-text">—</p>
+                    </div>
+
+                    <div class="assumptions-block">
+                        <h5>Identification Assumptions &amp; Methodological Limitations</h5>
+                        <p id="res-iptw-assumptions-text">—</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 6: Available Causal Analysis Methods -->
         <section class="section-card" aria-labelledby="methods-heading">
             <div class="section-header">
-                <h3 id="methods-heading">5. Available Causal Analysis Methods</h3>
+                <h3 id="methods-heading">6. Available Causal Analysis Methods</h3>
                 <p>Six estimators designed for experimental and observational causal inference with explicit identification assumptions.</p>
             </div>
 

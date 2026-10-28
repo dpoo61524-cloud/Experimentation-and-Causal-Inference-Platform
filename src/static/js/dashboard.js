@@ -147,6 +147,49 @@ document.addEventListener('DOMContentLoaded', function () {
     const resPsInterpretationText = document.getElementById('res-ps-interpretation-text');
     const resPsAssumptionsText = document.getElementById('res-ps-assumptions-text');
 
+    // Section 5: Causal Analysis (IPTW ATE) Elements
+    const iptwStatusBanner = document.getElementById('iptw-status-banner');
+    const iptwUnloadedNotice = document.getElementById('iptw-unloaded-notice');
+    const iptwFormContainer = document.getElementById('iptw-form-container');
+    const iptwDatasetName = document.getElementById('iptw-dataset-name');
+    const iptwDatasetId = document.getElementById('iptw-dataset-id');
+    const iptwDatasetRows = document.getElementById('iptw-dataset-rows');
+    const iptwDatasetCols = document.getElementById('iptw-dataset-cols');
+
+    const iptwForm = document.getElementById('iptw-analysis-form');
+    const iptwTreatmentSelect = document.getElementById('iptw-treatment-select');
+    const iptwOutcomeSelect = document.getElementById('iptw-outcome-select');
+    const iptwConfoundersContainer = document.getElementById('iptw-confounders-container');
+    const iptwExtremeWeightThresholdInput = document.getElementById('iptw-extreme-weight-threshold-input');
+    const iptwMaxWeightInput = document.getElementById('iptw-max-weight-input');
+    const iptwTruncateCheckbox = document.getElementById('iptw-truncate-checkbox');
+    const iptwTreatedValInput = document.getElementById('iptw-treated-val-input');
+    const iptwUntreatedValInput = document.getElementById('iptw-untreated-val-input');
+    const iptwDropMissingCheckbox = document.getElementById('iptw-drop-missing-checkbox');
+    const runIptwBtn = document.getElementById('run-iptw-btn');
+
+    // Section 5: Results Elements
+    const iptwResultsPanel = document.getElementById('iptw-results-panel');
+    const resIptwDatasetName = document.getElementById('res-iptw-dataset-name');
+    const resIptwTotalRows = document.getElementById('res-iptw-total-rows');
+    const resIptwEvalRows = document.getElementById('res-iptw-eval-rows');
+    const resIptwDroppedRows = document.getElementById('res-iptw-dropped-rows');
+    const resIptwAte = document.getElementById('res-iptw-ate');
+    const resIptwUnadjustedAte = document.getElementById('res-iptw-unadjusted-ate');
+    const resIptwMeanTreated = document.getElementById('res-iptw-mean-treated');
+    const resIptwTreatedSub = document.getElementById('res-iptw-treated-sub');
+    const resIptwMeanControl = document.getElementById('res-iptw-mean-control');
+    const resIptwControlSub = document.getElementById('res-iptw-control-sub');
+    const resIptwEssTotal = document.getElementById('res-iptw-ess-total');
+    const resIptwEssSub = document.getElementById('res-iptw-ess-sub');
+    const resIptwWeightSummary = document.getElementById('res-iptw-weight-summary');
+    const resIptwWeightSub = document.getElementById('res-iptw-weight-sub');
+    const iptwBalanceTbody = document.getElementById('iptw-balance-tbody');
+    const iptwWarningsCard = document.getElementById('iptw-warnings-card');
+    const iptwWarningsList = document.getElementById('iptw-warnings-list');
+    const resIptwInterpretationText = document.getElementById('res-iptw-interpretation-text');
+    const resIptwAssumptionsText = document.getElementById('res-iptw-assumptions-text');
+
     // Active session dataset metadata
     let currentDataset = null;
 
@@ -395,6 +438,7 @@ document.addEventListener('DOMContentLoaded', function () {
         setupAteAnalysis(data);
         setupRegAnalysis(data);
         setupPsAnalysis(data);
+        setupIptwAnalysis(data);
     }
 
     // --- 6. Causal Analysis (Unadjusted ATE) Logic ---
@@ -1317,6 +1361,484 @@ document.addEventListener('DOMContentLoaded', function () {
         }
         if (resPsAssumptionsText) {
             resPsAssumptionsText.textContent = r.assumptions || 'No identification assumptions documented.';
+        }
+    }
+
+    // --- 9. Causal Analysis (IPTW ATE) Logic ---
+    function showIptwStatus(message, type) {
+        if (!iptwStatusBanner) return;
+        iptwStatusBanner.className = 'status-indicator status-visible status-' + type;
+        iptwStatusBanner.textContent = message;
+    }
+
+    function clearIptwStatus() {
+        if (!iptwStatusBanner) return;
+        iptwStatusBanner.className = 'status-indicator';
+        iptwStatusBanner.textContent = '';
+    }
+
+    function setupIptwAnalysis(data) {
+        if (!data || !data.columns) return;
+        if (iptwUnloadedNotice) iptwUnloadedNotice.style.display = 'none';
+        if (iptwFormContainer) iptwFormContainer.style.display = 'block';
+        if (iptwResultsPanel) iptwResultsPanel.style.display = 'none';
+        clearIptwStatus();
+
+        if (iptwDatasetName) iptwDatasetName.textContent = data.filename + (data.is_benchmark ? ' [Benchmark]' : '');
+        if (iptwDatasetId) iptwDatasetId.textContent = data.dataset_id;
+        if (iptwDatasetRows) iptwDatasetRows.textContent = formatNumber(data.row_count);
+        if (iptwDatasetCols) iptwDatasetCols.textContent = formatNumber(data.column_count);
+
+        if (iptwTreatmentSelect) {
+            iptwTreatmentSelect.innerHTML = '<option value="">-- Choose treatment column --</option>';
+            let defaultTreatment = '';
+            data.columns.forEach(function (col) {
+                const optT = document.createElement('option');
+                optT.value = col.name;
+                optT.textContent = col.name + ' (' + col.inferred_type + ')';
+                iptwTreatmentSelect.appendChild(optT);
+
+                const nameLower = col.name.toLowerCase();
+                if (!defaultTreatment && (col.inferred_type === 'boolean' || nameLower === 'treatment' || nameLower === 'mens')) {
+                    defaultTreatment = col.name;
+                }
+            });
+            if (defaultTreatment) iptwTreatmentSelect.value = defaultTreatment;
+        }
+
+        if (iptwOutcomeSelect) {
+            iptwOutcomeSelect.innerHTML = '<option value="">-- Choose outcome column --</option>';
+            let defaultOutcome = '';
+            data.columns.forEach(function (col) {
+                const optO = document.createElement('option');
+                optO.value = col.name;
+                optO.textContent = col.name + ' (' + col.inferred_type + ')';
+                iptwOutcomeSelect.appendChild(optO);
+
+                const nameLower = col.name.toLowerCase();
+                if (!defaultOutcome && (col.inferred_type === 'continuous' || col.inferred_type === 'integer') &&
+                    (nameLower === 'spend' || nameLower === 'outcome' || nameLower === 'y' || nameLower === 'conversion')) {
+                    defaultOutcome = col.name;
+                }
+            });
+            if (defaultOutcome) iptwOutcomeSelect.value = defaultOutcome;
+        }
+
+        // Populate confounder checkboxes
+        if (iptwConfoundersContainer) {
+            iptwConfoundersContainer.innerHTML = '';
+            data.columns.forEach(function (col) {
+                const label = document.createElement('label');
+                label.className = 'confounder-checkbox-item';
+                label.setAttribute('data-col', col.name);
+
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.name = 'iptw-confounder';
+                checkbox.value = col.name;
+
+                // Check default confounders for Hillstrom if not treatment or outcome
+                const nameLower = col.name.toLowerCase();
+                if (data.is_benchmark && (nameLower === 'recency' || nameLower === 'history')) {
+                    checkbox.checked = true;
+                }
+
+                checkbox.addEventListener('change', function () {
+                    validateIptwForm();
+                });
+
+                const spanName = document.createElement('span');
+                spanName.textContent = col.name;
+
+                const spanType = document.createElement('span');
+                spanType.className = 'col-type-tag';
+                spanType.textContent = col.inferred_type;
+
+                label.appendChild(checkbox);
+                label.appendChild(spanName);
+                label.appendChild(spanType);
+
+                iptwConfoundersContainer.appendChild(label);
+            });
+        }
+
+        // Reset truncation inputs
+        if (iptwTruncateCheckbox) iptwTruncateCheckbox.checked = false;
+        if (iptwMaxWeightInput) {
+            iptwMaxWeightInput.disabled = true;
+            iptwMaxWeightInput.value = '';
+        }
+        if (iptwExtremeWeightThresholdInput) iptwExtremeWeightThresholdInput.value = '20.0';
+
+        updateIptwConfoundersAvailability();
+        validateIptwForm();
+    }
+
+    function updateIptwConfoundersAvailability() {
+        if (!iptwConfoundersContainer) return;
+        const tCol = iptwTreatmentSelect ? iptwTreatmentSelect.value : '';
+        const oCol = iptwOutcomeSelect ? iptwOutcomeSelect.value : '';
+
+        const items = iptwConfoundersContainer.querySelectorAll('.confounder-checkbox-item');
+        items.forEach(function (item) {
+            const col = item.getAttribute('data-col');
+            const checkbox = item.querySelector('input[type="checkbox"]');
+            if (!checkbox) return;
+
+            if (col && (col === tCol || col === oCol)) {
+                checkbox.checked = false;
+                checkbox.disabled = true;
+                item.classList.add('disabled');
+            } else {
+                checkbox.disabled = false;
+                item.classList.remove('disabled');
+            }
+        });
+    }
+
+    function getSelectedIptwConfounders() {
+        if (!iptwConfoundersContainer) return [];
+        const checkboxes = iptwConfoundersContainer.querySelectorAll('input[name="iptw-confounder"]:checked');
+        const selected = [];
+        checkboxes.forEach(function (cb) {
+            if (!cb.disabled && cb.value) {
+                selected.push(cb.value);
+            }
+        });
+        return selected;
+    }
+
+    function validateIptwForm() {
+        if (!currentDataset) {
+            if (runIptwBtn) runIptwBtn.disabled = true;
+            return false;
+        }
+
+        const tCol = iptwTreatmentSelect ? iptwTreatmentSelect.value : '';
+        const oCol = iptwOutcomeSelect ? iptwOutcomeSelect.value : '';
+        const selectedConfounders = getSelectedIptwConfounders();
+
+        if (!tCol || !oCol) {
+            clearIptwStatus();
+            if (runIptwBtn) runIptwBtn.disabled = true;
+            return false;
+        }
+
+        if (tCol === oCol) {
+            showIptwStatus('Treatment and Outcome cannot be the same column ("' + tCol + '").', 'error');
+            if (runIptwBtn) runIptwBtn.disabled = true;
+            return false;
+        }
+
+        if (selectedConfounders.length === 0) {
+            clearIptwStatus();
+            if (runIptwBtn) runIptwBtn.disabled = true;
+            return false;
+        }
+
+        for (let i = 0; i < selectedConfounders.length; i++) {
+            const cCol = selectedConfounders[i];
+            if (cCol === tCol) {
+                showIptwStatus('Confounder "' + cCol + '" cannot also be the Treatment column.', 'error');
+                if (runIptwBtn) runIptwBtn.disabled = true;
+                return false;
+            }
+            if (cCol === oCol) {
+                showIptwStatus('Confounder "' + cCol + '" cannot also be the Outcome column.', 'error');
+                if (runIptwBtn) runIptwBtn.disabled = true;
+                return false;
+            }
+        }
+
+        const extThresh = iptwExtremeWeightThresholdInput ? parseFloat(iptwExtremeWeightThresholdInput.value) : 20.0;
+        if (isNaN(extThresh) || extThresh <= 0) {
+            showIptwStatus('Extreme weight diagnostic threshold must be a positive number (> 0).', 'error');
+            if (runIptwBtn) runIptwBtn.disabled = true;
+            return false;
+        }
+
+        if (iptwTruncateCheckbox && iptwTruncateCheckbox.checked) {
+            const maxW = iptwMaxWeightInput ? parseFloat(iptwMaxWeightInput.value) : NaN;
+            if (isNaN(maxW) || maxW <= 0) {
+                showIptwStatus('Maximum weight truncation cap must be a positive number (> 0).', 'error');
+                if (runIptwBtn) runIptwBtn.disabled = true;
+                return false;
+            }
+        }
+
+        clearIptwStatus();
+        if (runIptwBtn) runIptwBtn.disabled = false;
+        return true;
+    }
+
+    if (iptwTreatmentSelect) {
+        iptwTreatmentSelect.addEventListener('change', function () {
+            updateIptwConfoundersAvailability();
+            validateIptwForm();
+        });
+    }
+
+    if (iptwOutcomeSelect) {
+        iptwOutcomeSelect.addEventListener('change', function () {
+            updateIptwConfoundersAvailability();
+            validateIptwForm();
+        });
+    }
+
+    if (iptwTruncateCheckbox) {
+        iptwTruncateCheckbox.addEventListener('change', function () {
+            if (iptwMaxWeightInput) {
+                iptwMaxWeightInput.disabled = !this.checked;
+                if (this.checked && !iptwMaxWeightInput.value) {
+                    iptwMaxWeightInput.value = '10.0';
+                }
+            }
+            validateIptwForm();
+        });
+    }
+
+    if (iptwMaxWeightInput) iptwMaxWeightInput.addEventListener('input', validateIptwForm);
+    if (iptwExtremeWeightThresholdInput) iptwExtremeWeightThresholdInput.addEventListener('input', validateIptwForm);
+
+    if (runIptwBtn) {
+        runIptwBtn.addEventListener('click', function (e) {
+            e.preventDefault();
+            if (!validateIptwForm()) return;
+            if (!currentDataset) {
+                showIptwStatus('No active dataset found. Please load or upload a dataset first.', 'error');
+                return;
+            }
+
+            const selectedConfounders = getSelectedIptwConfounders();
+            const isTrunc = iptwTruncateCheckbox ? iptwTruncateCheckbox.checked : false;
+            const payload = {
+                treatment_col: iptwTreatmentSelect.value,
+                outcome_col: iptwOutcomeSelect.value,
+                confounder_cols: selectedConfounders,
+                drop_missing: iptwDropMissingCheckbox ? iptwDropMissingCheckbox.checked : false,
+                extreme_weight_threshold: iptwExtremeWeightThresholdInput ? parseFloat(iptwExtremeWeightThresholdInput.value) || 20.0 : 20.0,
+                truncate_weights: isTrunc,
+            };
+
+            if (isTrunc && iptwMaxWeightInput && iptwMaxWeightInput.value) {
+                payload.max_weight = parseFloat(iptwMaxWeightInput.value);
+            }
+
+            const treatedVal = iptwTreatedValInput ? iptwTreatedValInput.value.trim() : '';
+            if (treatedVal !== '') payload.treated_value = treatedVal;
+
+            const untreatedVal = iptwUntreatedValInput ? iptwUntreatedValInput.value.trim() : '';
+            if (untreatedVal !== '') payload.untreated_value = untreatedVal;
+
+            runIptwBtn.disabled = true;
+            if (iptwResultsPanel) iptwResultsPanel.style.display = 'none';
+            showIptwStatus('Fitting propensity model and calculating IPTW treatment effect... Please wait.', 'info');
+
+            fetch('/api/dataset/' + encodeURIComponent(currentDataset.dataset_id) + '/causal/iptw-ate', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                },
+                body: JSON.stringify(payload),
+            })
+                .then(function (res) {
+                    if (!res.ok) {
+                        return res.json().then(function (err) {
+                            throw new Error(err.detail || 'IPTW request failed with HTTP ' + res.status);
+                        });
+                    }
+                    return res.json();
+                })
+                .then(function (results) {
+                    renderIptwResults(results);
+                    showIptwStatus('IPTW analysis complete: evaluated ' + formatNumber(results.n_total) + ' observations from ' + results.dataset_filename + '.', 'success');
+                })
+                .catch(function (err) {
+                    showIptwStatus('IPTW Analysis Error: ' + err.message, 'error');
+                })
+                .finally(function () {
+                    runIptwBtn.disabled = false;
+                });
+        });
+    }
+
+    function renderIptwResults(r) {
+        if (!r) return;
+        if (iptwResultsPanel) iptwResultsPanel.style.display = 'block';
+
+        if (resIptwDatasetName) resIptwDatasetName.textContent = r.dataset_filename || '—';
+        if (resIptwTotalRows) resIptwTotalRows.textContent = formatNumber(r.total_dataset_rows);
+        if (resIptwEvalRows) resIptwEvalRows.textContent = formatNumber(r.n_total);
+        if (resIptwDroppedRows) resIptwDroppedRows.textContent = formatNumber(r.rows_dropped);
+
+        if (resIptwAte) {
+            const prefix = r.iptw_ate > 0 ? '+' : '';
+            resIptwAte.textContent = prefix + Number(r.iptw_ate).toFixed(4);
+        }
+
+        if (resIptwUnadjustedAte) {
+            const prefix = r.unadjusted_ate > 0 ? '+' : '';
+            resIptwUnadjustedAte.textContent = prefix + Number(r.unadjusted_ate).toFixed(4);
+        }
+
+        if (resIptwMeanTreated) {
+            resIptwMeanTreated.textContent = (r.weighted_mean_outcome_treated !== null && r.weighted_mean_outcome_treated !== undefined) ? Number(r.weighted_mean_outcome_treated).toFixed(4) : '—';
+        }
+        if (resIptwTreatedSub) {
+            resIptwTreatedSub.textContent = 'N₁ = ' + formatNumber(r.n_treated) + ' treated units';
+        }
+
+        if (resIptwMeanControl) {
+            resIptwMeanControl.textContent = (r.weighted_mean_outcome_control !== null && r.weighted_mean_outcome_control !== undefined) ? Number(r.weighted_mean_outcome_control).toFixed(4) : '—';
+        }
+        if (resIptwControlSub) {
+            resIptwControlSub.textContent = 'N₀ = ' + formatNumber(r.n_control) + ' control units';
+        }
+
+        if (resIptwEssTotal) {
+            resIptwEssTotal.textContent = (r.ess_total !== null && r.ess_total !== undefined) ? Number(r.ess_total).toFixed(1) : '—';
+        }
+        if (resIptwEssSub) {
+            const tFrac = (r.ess_treated_fraction !== undefined) ? (r.ess_treated_fraction * 100).toFixed(1) + '%' : '—';
+            const cFrac = (r.ess_control_fraction !== undefined) ? (r.ess_control_fraction * 100).toFixed(1) + '%' : '—';
+            resIptwEssSub.textContent = 'Treated ESS: ' + Number(r.ess_treated || 0).toFixed(1) + ' (' + tFrac + '), Control: ' + Number(r.ess_control || 0).toFixed(1) + ' (' + cFrac + ')';
+        }
+
+        const ws = r.weight_summary || {};
+        if (resIptwWeightSummary) {
+            const minW = (ws.min_weight !== undefined) ? Number(ws.min_weight).toFixed(2) : '—';
+            const maxW = (ws.max_weight !== undefined) ? Number(ws.max_weight).toFixed(2) : '—';
+            const meanW = (ws.mean_weight !== undefined) ? Number(ws.mean_weight).toFixed(2) : '—';
+            resIptwWeightSummary.textContent = '[' + minW + ', ' + maxW + '] (μ=' + meanW + ')';
+        }
+        if (resIptwWeightSub) {
+            const nExt = ws.n_extreme_weights || 0;
+            const thresh = ws.extreme_weight_threshold || 20.0;
+            const isTrunc = ws.is_truncated ? 'Yes (capped at ' + ws.truncation_max_weight + ', ' + (ws.rows_truncated || 0) + ' clipped)' : 'No';
+            resIptwWeightSub.textContent = nExt + ' extreme weights (> ' + thresh + ') | Truncated: ' + isTrunc;
+        }
+
+        // Render Covariate Balance Table Before vs After Weighting
+        if (iptwBalanceTbody) {
+            iptwBalanceTbody.innerHTML = '';
+            const beforeMap = r.covariate_balance_before || {};
+            const afterMap = r.covariate_balance_after || {};
+            const allKeys = Object.keys(beforeMap);
+
+            if (allKeys.length === 0) {
+                const tr = document.createElement('tr');
+                const td = document.createElement('td');
+                td.colSpan = 6;
+                td.textContent = 'No covariate balance statistics available.';
+                td.style.textAlign = 'center';
+                tr.appendChild(td);
+                iptwBalanceTbody.appendChild(tr);
+            } else {
+                allKeys.forEach(function (colName) {
+                    const rowB = beforeMap[colName] || {};
+                    const rowA = afterMap[colName] || {};
+                    const tr = document.createElement('tr');
+
+                    // 1. Confounder name
+                    const tdName = document.createElement('td');
+                    tdName.style.fontWeight = '600';
+                    tdName.textContent = colName;
+                    tr.appendChild(tdName);
+
+                    // 2. Type
+                    const tdType = document.createElement('td');
+                    const spanType = document.createElement('span');
+                    spanType.className = 'col-type-tag';
+                    spanType.textContent = rowB.covariate_type || rowA.covariate_type || 'numeric';
+                    tdType.appendChild(spanType);
+                    tr.appendChild(tdType);
+
+                    // 3. Before SMD
+                    const tdBef = document.createElement('td');
+                    if (rowB.smd !== null && rowB.smd !== undefined) {
+                        const smdB = Number(rowB.smd);
+                        tdBef.textContent = (smdB > 0 ? '+' : '') + smdB.toFixed(3);
+                    } else {
+                        tdBef.textContent = '—';
+                    }
+                    tr.appendChild(tdBef);
+
+                    // 4. After SMD
+                    const tdAft = document.createElement('td');
+                    if (rowA.smd !== null && rowA.smd !== undefined) {
+                        const smdA = Number(rowA.smd);
+                        tdAft.textContent = (smdA > 0 ? '+' : '') + smdA.toFixed(3);
+                    } else {
+                        tdAft.textContent = '—';
+                    }
+                    tr.appendChild(tdAft);
+
+                    // 5. SMD Change (Delta)
+                    const tdDelta = document.createElement('td');
+                    if (rowB.smd !== null && rowB.smd !== undefined && rowA.smd !== null && rowA.smd !== undefined) {
+                        const absB = Math.abs(Number(rowB.smd));
+                        const absA = Math.abs(Number(rowA.smd));
+                        const diff = absA - absB;
+                        if (diff < -0.001) {
+                            tdDelta.textContent = diff.toFixed(3) + ' (improved)';
+                            tdDelta.style.color = 'var(--deep-sage)';
+                            tdDelta.style.fontWeight = '600';
+                        } else if (diff > 0.001) {
+                            tdDelta.textContent = '+' + diff.toFixed(3) + ' (worsened)';
+                            tdDelta.style.color = '#B91C1C';
+                        } else {
+                            tdDelta.textContent = '0.000 (unchanged)';
+                            tdDelta.style.color = 'var(--text-secondary)';
+                        }
+                    } else {
+                        tdDelta.textContent = '—';
+                    }
+                    tr.appendChild(tdDelta);
+
+                    // 6. Post-Weighting Balance Status Badge
+                    const tdStatus = document.createElement('td');
+                    const spanStatus = document.createElement('span');
+                    if (rowA.is_balanced === true) {
+                        spanStatus.className = 'type-badge type-boolean';
+                        spanStatus.textContent = 'Balanced (|SMD| ≤ 0.10)';
+                    } else if (rowA.is_balanced === false) {
+                        spanStatus.className = 'type-badge type-string';
+                        spanStatus.textContent = 'Imbalanced (|SMD| > 0.10)';
+                        spanStatus.style.backgroundColor = '#FEE2E2';
+                        spanStatus.style.color = '#B91C1C';
+                    } else {
+                        spanStatus.className = 'type-badge type-unknown';
+                        spanStatus.textContent = rowA.note || 'Categorical (unweighted)';
+                    }
+                    tdStatus.appendChild(spanStatus);
+                    tr.appendChild(tdStatus);
+
+                    iptwBalanceTbody.appendChild(tr);
+                });
+            }
+        }
+
+        // Render Diagnostic Warnings
+        if (iptwWarningsCard && iptwWarningsList) {
+            iptwWarningsList.innerHTML = '';
+            if (r.warnings && r.warnings.length > 0) {
+                r.warnings.forEach(function (warnMsg) {
+                    const li = document.createElement('li');
+                    li.textContent = warnMsg;
+                    iptwWarningsList.appendChild(li);
+                });
+                iptwWarningsCard.style.display = 'block';
+            } else {
+                iptwWarningsCard.style.display = 'none';
+            }
+        }
+
+        if (resIptwInterpretationText) {
+            resIptwInterpretationText.textContent = r.interpretation || 'No interpretation provided.';
+        }
+        if (resIptwAssumptionsText) {
+            resIptwAssumptionsText.textContent = r.assumptions || 'No identification assumptions documented.';
         }
     }
 });
