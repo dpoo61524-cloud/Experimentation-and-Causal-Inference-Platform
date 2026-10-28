@@ -38,6 +38,11 @@ from causal_engine import (
     run_causal_sensitivity_analysis,
     analyze_unmeasured_confounding_sensitivity,
 )
+from dataset_manager import (
+    DatasetIngestionResponse,
+    default_dataset_manager,
+)
+from urllib.parse import unquote
 import numpy as np
 
 app = FastAPI(
@@ -268,6 +273,96 @@ async def dashboard() -> FileResponse:
             detail="Dashboard frontend files not found.",
         )
     return FileResponse(str(index_path), media_type="text/html")
+
+
+# --- Dataset Ingestion Endpoints ---
+
+@app.post(
+    "/api/dataset/upload",
+    response_model=DatasetIngestionResponse,
+    tags=["Datasets"],
+    summary="Upload and inspect CSV dataset with bounded streaming",
+)
+async def upload_dataset_endpoint(request: Request) -> DatasetIngestionResponse:
+    """Stream an uploaded CSV dataset to managed storage, enforcing bounded memory and size limits.
+
+    Parses headers, validates row consistency, infers column data types,
+    computes missing value statistics, and generates a bounded 5-row preview.
+    """
+    raw_filename = request.headers.get("X-Filename") or request.query_params.get("filename") or "uploaded_dataset.csv"
+    clean_filename = unquote(raw_filename)
+
+    try:
+        response = await default_dataset_manager.ingest_stream(
+            request.stream(),
+            filename=clean_filename,
+        )
+        return response
+    except ValueError as exc:
+        err_msg = str(exc)
+        if "PAYLOAD_TOO_LARGE" in err_msg:
+            raise HTTPException(
+                status_code=getattr(status, "HTTP_413_CONTENT_TOO_LARGE", 413),
+                detail=err_msg.replace("PAYLOAD_TOO_LARGE: ", ""),
+            )
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=err_msg,
+        )
+
+
+@app.post(
+    "/api/dataset/load-benchmark",
+    response_model=DatasetIngestionResponse,
+    tags=["Datasets"],
+    summary="Load Hillstrom benchmark dataset safely from project data directory",
+)
+async def load_benchmark_endpoint() -> DatasetIngestionResponse:
+    """Load the Hillstrom email marketing benchmark dataset safely from project-relative data/hillstrom.csv."""
+    try:
+        project_root = SRC_DIR.parent
+        response = default_dataset_manager.load_benchmark(project_root)
+        return response
+    except ValueError as exc:
+        if "not found" in str(exc).lower():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=str(exc),
+        )
+
+
+@app.get(
+    "/api/dataset/{dataset_id}",
+    response_model=DatasetIngestionResponse,
+    tags=["Datasets"],
+    summary="Retrieve dataset schema and preview by opaque ID",
+)
+async def get_dataset_metadata(dataset_id: str) -> DatasetIngestionResponse:
+    """Retrieve metadata and bounded preview for an active dataset by its opaque UUID4 identifier."""
+    dataset = default_dataset_manager.get_dataset(dataset_id)
+    if dataset is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Dataset '{dataset_id}' not found or has expired.",
+        )
+    return dataset
+
+
+@app.delete(
+    "/api/dataset/{dataset_id}",
+    tags=["Datasets"],
+    summary="Delete dataset and release temporary storage",
+)
+async def delete_dataset_endpoint(dataset_id: str) -> Dict[str, Any]:
+    """Explicitly delete a stored dataset and free managed disk space."""
+    deleted = default_dataset_manager.delete_dataset(dataset_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Dataset '{dataset_id}' not found or already deleted.",
+        )
+    return {"status": "deleted", "dataset_id": dataset_id}
 
 
 @app.post(

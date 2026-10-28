@@ -27,18 +27,132 @@
     <main class="dashboard-workspace">
         <div class="workspace-heading">
             <h2>Causal Analysis Dashboard</h2>
-            <p>Select an econometric or statistical method to evaluate average treatment effects under various observational and experimental assumptions.</p>
+            <p>Ingest experimental or observational CSV data, inspect column schemas and missing values, and evaluate treatment effects.</p>
         </div>
 
         <!-- Stage Notice Banner -->
         <div class="info-banner" role="region" aria-label="Development Notice">
-            <strong>Foundation Notice:</strong> This dashboard provides the core layout and API integration skeleton. Dataset upload, CSV schema inspection, and interactive model execution will be introduced in subsequent stages. All statistical algorithms are executed directly by the FastAPI backend engine.
+            <strong>Stage 7.3 Data Ingestion:</strong> Dataset ingestion, schema inspection, and benchmark dataset loading are active below. Interactive execution of the six causal estimators will be connected in Stages 7.4 through 7.6. All statistical calculations are executed by the FastAPI causal engine.
         </div>
 
-        <!-- Section: Available Causal Analysis Methods -->
+        <!-- Section 1: Dataset Ingestion & Schema Inspector -->
+        <section class="section-card" aria-labelledby="ingestion-heading">
+            <div class="section-header">
+                <h3 id="ingestion-heading">1. Dataset Ingestion &amp; Schema Inspector</h3>
+                <p>Upload a custom CSV file or load the verified Hillstrom benchmark dataset for causal analysis.</p>
+            </div>
+
+            <!-- Ingestion Controls Panel -->
+            <div class="ingestion-panel">
+                <!-- Upload Custom CSV Box -->
+                <div class="upload-box">
+                    <h4>Upload Custom CSV</h4>
+                    <p>Select a local CSV file. The file is streamed incrementally and validated with bounded memory.</p>
+                    <div class="file-input-wrapper">
+                        <input type="file" id="csv-file-input" class="file-input" accept=".csv,text/csv" aria-label="Choose CSV dataset file">
+                        <span id="file-meta-display" class="file-meta-display">No file chosen (Server limit: 500 MB)</span>
+                    </div>
+                    <button type="button" id="upload-csv-btn" class="btn btn-primary" disabled>
+                        Upload &amp; Inspect CSV
+                    </button>
+                </div>
+
+                <!-- Hillstrom Benchmark Box -->
+                <div class="benchmark-box">
+                    <h4>Hillstrom Benchmark Dataset</h4>
+                    <p>Load the verified email campaign dataset (64,000 customers, 12 attributes) stored on the server at <code>data/hillstrom.csv</code>.</p>
+                    <button type="button" id="load-benchmark-btn" class="btn btn-secondary">
+                        Load Hillstrom Benchmark Dataset
+                    </button>
+                </div>
+            </div>
+
+            <!-- Status Indicator Banner -->
+            <div id="status-banner" class="status-indicator" role="alert" aria-live="polite"></div>
+
+            <!-- Initial Empty State -->
+            <div id="empty-dataset-state" class="empty-state-box">
+                <p class="empty-state-title">No Dataset Loaded</p>
+                <p class="empty-state-desc">Upload a CSV dataset or click &ldquo;Load Hillstrom Benchmark Dataset&rdquo; above to inspect its schema and preview rows.</p>
+                <p class="empty-state-note">Status: Ready for CSV ingestion</p>
+            </div>
+
+            <!-- Loaded Dataset View (Hidden until a dataset is loaded) -->
+            <div id="loaded-dataset-view" style="display: none;">
+                <!-- Overview KPI Badges -->
+                <div class="dataset-overview-grid">
+                    <div class="overview-kpi-card">
+                        <div class="kpi-label">Active Dataset</div>
+                        <div id="kpi-filename" class="kpi-value" style="font-size: 15px; word-break: break-all;">&mdash;</div>
+                        <div class="kpi-subtext">Verified on server</div>
+                    </div>
+                    <div class="overview-kpi-card">
+                        <div class="kpi-label">Total Data Rows</div>
+                        <div id="kpi-row-count" class="kpi-value">&mdash;</div>
+                        <div class="kpi-subtext">Full dataset count</div>
+                    </div>
+                    <div class="overview-kpi-card">
+                        <div class="kpi-label">Total Columns</div>
+                        <div id="kpi-column-count" class="kpi-value">&mdash;</div>
+                        <div class="kpi-subtext">Attributes detected</div>
+                    </div>
+                    <div class="overview-kpi-card">
+                        <div class="kpi-label">File Size</div>
+                        <div id="kpi-file-size" class="kpi-value">&mdash;</div>
+                        <div class="kpi-subtext">On-disk storage</div>
+                    </div>
+                    <div class="overview-kpi-card">
+                        <div class="kpi-label">Missing Values</div>
+                        <div id="kpi-missing-total" class="kpi-value">&mdash;</div>
+                        <div class="kpi-subtext">Across all cells</div>
+                    </div>
+                </div>
+
+                <!-- Bounded Preview Table -->
+                <div style="margin-bottom: 24px;">
+                    <h4 style="font-size: 14px; font-weight: 600; margin-bottom: 4px;">Dataset Preview (First 5 Rows)</h4>
+                    <p id="preview-table-caption" class="table-footnote" style="margin-bottom: 8px;">
+                        Preview: Showing first 5 records. Full dataset preserved for analysis.
+                    </p>
+                    <div class="table-container">
+                        <table class="data-table">
+                            <thead id="preview-table-header"></thead>
+                            <tbody id="preview-table-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Schema Inspector Table -->
+                <div>
+                    <h4 style="font-size: 14px; font-weight: 600; margin-bottom: 4px;">Schema Inspector &amp; Type Diagnostics</h4>
+                    <p class="table-footnote" style="margin-bottom: 8px;">
+                        Column types inferred via single-pass streaming lattice (boolean &rarr; integer &rarr; numeric &rarr; categorical).
+                    </p>
+                    <div class="table-container">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Column Name</th>
+                                    <th>Inferred Type</th>
+                                    <th>Missing Count</th>
+                                    <th>Missing Percentage</th>
+                                    <th>Valid Values</th>
+                                </tr>
+                            </thead>
+                            <tbody id="schema-table-body"></tbody>
+                        </table>
+                    </div>
+                    <p class="table-footnote">
+                        <strong>Missing-Value Policy:</strong> Empty fields, whitespace-only, and case-insensitive tokens (<code>NA</code>, <code>N/A</code>, <code>null</code>, <code>none</code>, <code>nan</code>, <code>.</code>) are counted as missing. No rows are modified or dropped at this stage.
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 2: Available Causal Analysis Methods -->
         <section class="section-card" aria-labelledby="methods-heading">
             <div class="section-header">
-                <h3 id="methods-heading">Available Causal Analysis Methods</h3>
+                <h3 id="methods-heading">2. Available Causal Analysis Methods</h3>
                 <p>Six estimators designed for experimental and observational causal inference with explicit identification assumptions.</p>
             </div>
 
@@ -87,7 +201,7 @@
                     <div class="method-top">
                         <span class="method-number">Method 4</span>
                         <h4 class="method-title">IPTW ATE</h4>
-                        <p class="method-desc">Reweights observations by inverse propensity scores using the Hájek estimator. Reports Kish effective sample size and covariate balance (SMD).</p>
+                        <p class="method-desc">Reweights observations by inverse propensity scores using the H&aacute;jek estimator. Reports Kish effective sample size and covariate balance (SMD).</p>
                     </div>
                     <div class="method-meta">
                         <div><strong>Assumption:</strong> Strong exchangeability, positivity</div>
@@ -122,19 +236,6 @@
                 </article>
             </div>
         </section>
-
-        <!-- Section: Dataset Initial State (Empty State) -->
-        <section class="section-card" aria-labelledby="dataset-status-heading">
-            <div class="section-header">
-                <h3 id="dataset-status-heading">Dataset Status</h3>
-                <p>Data workspace and loaded observations.</p>
-            </div>
-            <div class="empty-state-box">
-                <p class="empty-state-title">No Dataset Loaded</p>
-                <p class="empty-state-desc">No active data table is currently loaded in memory. Dataset upload, CSV schema inspection, and benchmark dataset loading will be introduced in subsequent stages.</p>
-                <p class="empty-state-note">Status: Ready for Stage 7.3 Data Ingestion</p>
-            </div>
-        </section>
     </main>
 
     <!-- Footer -->
@@ -142,36 +243,7 @@
         <p>Experimentation and Causal Inference Platform &bull; MCA Internship Project &bull; FastAPI Backend Service &bull; <a href="/docs">API Documentation (/docs)</a> &bull; <a href="/health">Health Endpoint (/health)</a></p>
     </footer>
 
-    <!-- Real API Health Check Script -->
-    <script>
-        document.addEventListener('DOMContentLoaded', function () {
-            const healthBadge = document.getElementById('health-badge');
-            const healthText = document.getElementById('health-text');
-
-            function updateHealthStatus(status, text) {
-                healthBadge.className = 'health-badge ' + status;
-                healthText.textContent = text;
-            }
-
-            // Perform real, unhardcoded health check against GET /health
-            fetch('/health', { method: 'GET', headers: { 'Accept': 'application/json' } })
-                .then(function (response) {
-                    if (!response.ok) {
-                        throw new Error('Server returned HTTP ' + response.status);
-                    }
-                    return response.json();
-                })
-                .then(function (data) {
-                    if (data && data.status === 'healthy') {
-                        updateHealthStatus('health-healthy', 'API: Healthy');
-                    } else {
-                        updateHealthStatus('health-unhealthy', 'API: Unhealthy');
-                    }
-                })
-                .catch(function (error) {
-                    updateHealthStatus('health-unhealthy', 'API: Offline');
-                });
-        });
-    </script>
+    <!-- Scripts -->
+    <script src="/static/js/dashboard.js"></script>
 </body>
 </html>
