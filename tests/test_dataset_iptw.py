@@ -557,7 +557,7 @@ def test_dashboard_html_contains_iptw_section():
     # Section card and headings
     assert 'id="iptw-analysis-section"' in html
     assert 'id="iptw-analysis-heading"' in html
-    assert "5. Causal Analysis: Inverse Probability of Treatment Weighting (IPTW) ATE" in html
+    assert "5. Inverse Probability of Treatment Weighting (IPTW)" in html
 
     # Form controls
     assert 'id="iptw-treatment-select"' in html

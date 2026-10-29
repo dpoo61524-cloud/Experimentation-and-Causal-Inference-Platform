@@ -3,67 +3,35 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Experimentation and Causal Inference Platform</title>
+    <title>Causal Analysis Dashboard</title>
     <link rel="stylesheet" href="/static/css/dashboard.css">
 </head>
 <body>
-    <!-- Application Header -->
-    <header class="app-header">
-        <div class="header-container">
-            <div class="brand-block">
-                <h1>Experimentation and Causal Inference Platform</h1>
-                <p>An academic experimentation and causal inference tool for treatment effect estimation</p>
-            </div>
-            <div class="header-actions">
-                <div id="health-badge" class="health-badge health-checking" role="status" aria-live="polite">
-                    <span class="health-dot"></span>
-                    <span id="health-text" class="health-text">API: Checking...</span>
-                </div>
-            </div>
-        </div>
-    </header>
-
     <!-- Main Dashboard Workspace -->
     <main class="dashboard-workspace">
         <div class="workspace-heading">
             <h2>Causal Analysis Dashboard</h2>
-            <p>Ingest experimental or observational CSV data, inspect column schemas and missing values, and evaluate treatment effects.</p>
         </div>
 
-        <!-- Stage Notice Banner -->
-        <div class="info-banner" role="region" aria-label="Development Notice">
-            <strong>Stage 7.6B Active:</strong> Dataset ingestion, schema inspection, Unadjusted ATE, Regression-Adjusted ATE, Propensity Score Estimation, Inverse Probability of Treatment Weighting (IPTW), Difference-in-Differences (DiD), and Causal Sensitivity Analysis are fully operational. All statistical calculations are executed by the FastAPI causal engine.
-        </div>
-
-        <!-- Section 1: Dataset Ingestion & Schema Inspector -->
+        <!-- Section 1: Dataset Upload -->
         <section class="section-card" aria-labelledby="ingestion-heading">
             <div class="section-header">
-                <h3 id="ingestion-heading">1. Dataset Ingestion &amp; Schema Inspector</h3>
-                <p>Upload a custom CSV file or load the verified Hillstrom benchmark dataset for causal analysis.</p>
+                <h3 id="ingestion-heading">1. Dataset Upload</h3>
             </div>
 
             <!-- Ingestion Controls Panel -->
             <div class="ingestion-panel">
                 <!-- Upload Custom CSV Box -->
                 <div class="upload-box">
-                    <h4>Upload Custom CSV</h4>
-                    <p>Select a local CSV file. The file is streamed incrementally and validated with bounded memory.</p>
+                    <h4>Upload CSV</h4>
                     <div class="file-input-wrapper">
                         <input type="file" id="csv-file-input" class="file-input" accept=".csv,text/csv" aria-label="Choose CSV dataset file">
-                        <span id="file-meta-display" class="file-meta-display">No file chosen (Server limit: 500 MB)</span>
+                        <span id="file-meta-display" class="file-meta-display">No file chosen</span>
                     </div>
                     <button type="button" id="upload-csv-btn" class="btn btn-primary" disabled>
-                        Upload &amp; Inspect CSV
+                        Upload CSV
                     </button>
-                </div>
-
-                <!-- Hillstrom Benchmark Box -->
-                <div class="benchmark-box">
-                    <h4>Hillstrom Benchmark Dataset</h4>
-                    <p>Load the verified email campaign dataset (64,000 customers, 12 attributes) stored on the server at <code>data/hillstrom.csv</code>.</p>
-                    <button type="button" id="load-benchmark-btn" class="btn btn-secondary">
-                        Load Hillstrom Benchmark Dataset
-                    </button>
+                    <div id="uploaded-file-banner" class="uploaded-file-info" style="display: none;"></div>
                 </div>
             </div>
 
@@ -73,8 +41,7 @@
             <!-- Initial Empty State -->
             <div id="empty-dataset-state" class="empty-state-box">
                 <p class="empty-state-title">No Dataset Loaded</p>
-                <p class="empty-state-desc">Upload a CSV dataset or click &ldquo;Load Hillstrom Benchmark Dataset&rdquo; above to inspect its schema and preview rows.</p>
-                <p class="empty-state-note">Status: Ready for CSV ingestion</p>
+                <p class="empty-state-desc">Upload a CSV file to get started.</p>
             </div>
 
             <!-- Loaded Dataset View (Hidden until a dataset is loaded) -->
@@ -149,11 +116,10 @@
             </div>
         </section>
 
-        <!-- Section 2: Causal Analysis — Unadjusted ATE -->
+        <!-- Section 2: Unadjusted Average Treatment Effect (ATE) -->
         <section class="section-card" id="causal-analysis-section" aria-labelledby="causal-analysis-heading">
             <div class="section-header">
-                <h3 id="causal-analysis-heading">2. Causal Analysis: Unadjusted Average Treatment Effect (ATE)</h3>
-                <p>Estimate the difference in sample means with Welch-style robust standard errors and confidence intervals from an active dataset.</p>
+                <h3 id="causal-analysis-heading">2. Unadjusted Average Treatment Effect (ATE)</h3>
             </div>
 
             <!-- Analysis Status / Alert Banner -->
@@ -161,9 +127,7 @@
 
             <!-- Unloaded Dataset Notice -->
             <div id="ate-unloaded-notice" class="empty-state-box">
-                <p class="empty-state-title">No Active Dataset Available for Analysis</p>
-                <p class="empty-state-desc">Upload a CSV or load the Hillstrom benchmark dataset in Section 1 above to enable causal analysis and column selection.</p>
-                <p class="empty-state-note">Status: Awaiting dataset ingestion</p>
+                <p class="empty-state-title">No Dataset Loaded</p>
             </div>
 
             <!-- Form & Results Container (Hidden until a dataset is loaded) -->
@@ -300,11 +264,10 @@
             </div>
         </section>
 
-        <!-- Section 3: Causal Analysis — Regression-Adjusted ATE -->
+        <!-- Section 3: Regression-Adjusted Average Treatment Effect (ATE) -->
         <section class="section-card" id="regression-analysis-section" aria-labelledby="regression-analysis-heading">
             <div class="section-header">
-                <h3 id="regression-analysis-heading">3. Causal Analysis: Regression-Adjusted Average Treatment Effect (ATE)</h3>
-                <p>Adjust for observed baseline confounders using G-computation (standardization) over an Ordinary Least Squares outcome response surface.</p>
+                <h3 id="regression-analysis-heading">3. Regression-Adjusted Average Treatment Effect (ATE)</h3>
             </div>
 
             <!-- Analysis Status / Alert Banner -->
@@ -312,9 +275,7 @@
 
             <!-- Unloaded Dataset Notice -->
             <div id="reg-unloaded-notice" class="empty-state-box">
-                <p class="empty-state-title">No Active Dataset Available for Regression Adjustment</p>
-                <p class="empty-state-desc">Upload a CSV or load the Hillstrom benchmark dataset in Section 1 above to select covariates and run regression-adjusted ATE estimation.</p>
-                <p class="empty-state-note">Status: Awaiting dataset ingestion</p>
+                <p class="empty-state-title">No Dataset Loaded</p>
             </div>
 
             <!-- Form & Results Container (Hidden until a dataset is loaded) -->
@@ -467,19 +428,18 @@
             </div>
         </section>
 
-        <!-- Section 4: Causal Diagnostics — Propensity Score Estimation & Overlap -->
+        <!-- Section 4: Propensity Score Estimation & Overlap -->
         <section id="propensity-analysis-section" class="section-card" aria-labelledby="ps-analysis-heading">
             <div class="section-header">
-                <h3 id="ps-analysis-heading">4. Causal Diagnostics: Propensity Score Estimation &amp; Overlap</h3>
-                <p>Model treatment assignment probabilities e(X) = P(T=1 | X) via logistic regression to evaluate common support, positivity, and pre-adjustment covariate balance.</p>
+                <h3 id="ps-analysis-heading">4. Propensity Score Estimation &amp; Overlap</h3>
             </div>
 
             <!-- Status Banner for Propensity Score Estimation -->
             <div id="ps-status-banner" class="status-indicator" role="status" aria-live="polite"></div>
 
             <!-- Unloaded State Notice -->
-            <div id="ps-unloaded-notice" class="empty-state">
-                <p>No dataset selected for propensity score estimation. Ingest a CSV dataset or load the Hillstrom benchmark above to enable propensity score modeling.</p>
+            <div id="ps-unloaded-notice" class="empty-state-box">
+                <p class="empty-state-title">No Dataset Loaded</p>
             </div>
 
             <!-- Interactive Analysis Form (Hidden until dataset loaded) -->
@@ -490,11 +450,6 @@
                     <span class="meta-item"><strong>Dataset ID:</strong> <span id="ps-dataset-id" class="code-id">—</span></span>
                     <span class="meta-item"><strong>Total Records:</strong> <span id="ps-dataset-rows">—</span></span>
                     <span class="meta-item"><strong>Columns:</strong> <span id="ps-dataset-cols">—</span></span>
-                </div>
-
-                <!-- Educational Notice Banner distinguishing propensity score from causal effect -->
-                <div class="info-banner" style="margin-bottom: 16px; border-left-color: var(--sage-accent);">
-                    <strong>Diagnostic Role:</strong> Propensity scores represent conditional probabilities of treatment assignment, <em>not</em> treatment effect estimates. They are used to diagnose common support (positivity) and covariate imbalance before applying downstream causal methods (such as matching, IPTW, or stratification).
                 </div>
 
                 <form id="ps-analysis-form" class="causal-analysis-form" onsubmit="return false;">
@@ -672,19 +627,18 @@
             </div>
         </section>
 
-        <!-- Section 5: Causal Analysis — Inverse Probability of Treatment Weighting (IPTW) ATE -->
+        <!-- Section 5: Inverse Probability of Treatment Weighting (IPTW) -->
         <section id="iptw-analysis-section" class="section-card" aria-labelledby="iptw-analysis-heading">
             <div class="section-header">
-                <h3 id="iptw-analysis-heading">5. Causal Analysis: Inverse Probability of Treatment Weighting (IPTW) ATE</h3>
-                <p>Estimate the Average Treatment Effect (ATE) by weighting observations with inverse propensity scores using the H&aacute;jek estimator to correct for observable confounding.</p>
+                <h3 id="iptw-analysis-heading">5. Inverse Probability of Treatment Weighting (IPTW)</h3>
             </div>
 
             <!-- Status Banner for IPTW Analysis -->
             <div id="iptw-status-banner" class="status-indicator" role="status" aria-live="polite"></div>
 
             <!-- Unloaded State Notice -->
-            <div id="iptw-unloaded-notice" class="empty-state">
-                <p>No dataset selected for IPTW analysis. Ingest a CSV dataset or load the Hillstrom benchmark above to enable IPTW estimation.</p>
+            <div id="iptw-unloaded-notice" class="empty-state-box">
+                <p class="empty-state-title">No Dataset Loaded</p>
             </div>
 
             <!-- Interactive Analysis Form (Hidden until dataset loaded) -->
@@ -695,12 +649,6 @@
                     <span class="meta-item"><strong>Dataset ID:</strong> <span id="iptw-dataset-id" class="code-id">—</span></span>
                     <span class="meta-item"><strong>Total Records:</strong> <span id="iptw-dataset-rows">—</span></span>
                     <span class="meta-item"><strong>Columns:</strong> <span id="iptw-dataset-cols">—</span></span>
-                </div>
-
-                <!-- Educational Notice Banner for IPTW -->
-                <div class="info-banner" style="margin-bottom: 16px; border-left-color: var(--sage-accent);">
-                    <strong>Causal Weighting Mechanism:</strong> IPTW creates a synthetic pseudo-population by assigning weights <code>w = 1 / e(X)</code> to treated units and <code>w = 1 / (1 - e(X))</code> to control units. This balances observed confounders across groups so that treatment assignment is pseudo-randomized.
-                    Causal validity requires <em>conditional exchangeability</em> (no unobserved confounders), <em>positivity</em> (0 &lt; e(X) &lt; 1), and a <em>correctly specified propensity score model</em>. Extreme weights inflate variance; weight truncation trades slight bias for lower variance.
                 </div>
 
                 <form id="iptw-analysis-form" class="causal-analysis-form" onsubmit="return false;">
@@ -893,19 +841,18 @@
             </div>
         </section>
 
-        <!-- Section 6: Causal Analysis — Difference-in-Differences (DiD) -->
+        <!-- Section 6: Difference-in-Differences (DiD) -->
         <section id="did-analysis-section" class="section-card" aria-labelledby="did-analysis-heading">
             <div class="section-header">
-                <h3 id="did-analysis-heading">6. Causal Analysis: Difference-in-Differences (DiD)</h3>
-                <p>Estimate the causal treatment effect across two groups and two time periods by calculating the change over time in the treated group relative to the control group.</p>
+                <h3 id="did-analysis-heading">6. Difference-in-Differences (DiD)</h3>
             </div>
 
             <!-- Status Banner for DiD Analysis -->
             <div id="did-status-banner" class="status-indicator" role="status" aria-live="polite"></div>
 
             <!-- Unloaded State Notice -->
-            <div id="did-unloaded-notice" class="empty-state">
-                <p>No dataset selected for DiD analysis. Ingest a CSV dataset or load the Hillstrom benchmark above to enable Difference-in-Differences estimation.</p>
+            <div id="did-unloaded-notice" class="empty-state-box">
+                <p class="empty-state-title">No Dataset Loaded</p>
             </div>
 
             <!-- Interactive Analysis Form (Hidden until dataset loaded) -->
@@ -916,11 +863,6 @@
                     <span class="meta-item"><strong>Dataset ID:</strong> <span id="did-dataset-id" class="code-id">—</span></span>
                     <span class="meta-item"><strong>Total Records:</strong> <span id="did-dataset-rows">—</span></span>
                     <span class="meta-item"><strong>Columns:</strong> <span id="did-dataset-cols">—</span></span>
-                </div>
-
-                <!-- Educational Notice Banner for DiD -->
-                <div class="info-banner" style="margin-top: 12px; margin-bottom: 14px;">
-                    <strong>Methodology &amp; Identification Assumptions:</strong> Difference-in-Differences identifies the causal treatment effect under the <strong>Parallel Trends</strong> assumption: in the absence of treatment, the average outcome in the treated group would have followed the same trajectory as the control group (&Delta;<sub>T</sub> = &Delta;<sub>C</sub>). Requires observations across all four 2&times;2 cells (Treated Pre/Post and Control Pre/Post) and assumes no anticipation, no concurrent differential shocks, and SUTVA.
                 </div>
 
                 <form id="did-analysis-form" class="analysis-form" onsubmit="return false;">
@@ -1111,19 +1053,18 @@
             </div>
         </section>
 
-        <!-- Section 7: Causal Sensitivity Analysis & Robustness Checks -->
+        <!-- Section 7: Sensitivity Analysis -->
         <section id="sensitivity-analysis-section" class="section-card" aria-labelledby="sensitivity-analysis-heading">
             <div class="section-header">
-                <h3 id="sensitivity-analysis-heading">7. Causal Sensitivity Analysis &amp; Robustness Checks</h3>
-                <p>Evaluate the vulnerability of causal estimates across alternative estimators, IPTW weight truncation thresholds, and hypothetical unmeasured confounding bias scenarios.</p>
+                <h3 id="sensitivity-analysis-heading">7. Sensitivity Analysis</h3>
             </div>
 
             <!-- Status Banner for Sensitivity Analysis -->
             <div id="sens-status-banner" class="status-indicator" role="status" aria-live="polite"></div>
 
             <!-- Unloaded State Notice -->
-            <div id="sens-unloaded-notice" class="empty-state">
-                <p>No dataset selected for sensitivity analysis. Ingest a CSV dataset or load the Hillstrom benchmark above to enable sensitivity and robustness checks.</p>
+            <div id="sens-unloaded-notice" class="empty-state-box">
+                <p class="empty-state-title">No Dataset Loaded</p>
             </div>
 
             <!-- Interactive Form Container -->
@@ -1134,15 +1075,6 @@
                     <span class="meta-item"><strong>Dataset ID:</strong> <span id="sens-dataset-id" class="code-id">—</span></span>
                     <span class="meta-item"><strong>Total Records:</strong> <span id="sens-dataset-rows">—</span></span>
                     <span class="meta-item"><strong>Columns:</strong> <span id="sens-dataset-cols">—</span></span>
-                </div>
-
-                <!-- Educational Notice Banner for Sensitivity -->
-                <div class="info-banner" style="margin-top: 12px; margin-bottom: 14px;">
-                    <strong>Methodology &amp; Purpose:</strong> Sensitivity analysis assesses whether qualitative conclusions depend critically on modeling assumptions or unmeasured confounding. Evaluates three complementary dimensions:
-                    (1) <em>Multi-Estimator Comparison</em> across Unadjusted ATE, Regression Adjustment (G-computation), and IPTW;
-                    (2) <em>IPTW Weight Truncation Robustness</em> across upper weight thresholds; and
-                    (3) <em>Hypothetical Unmeasured Confounding</em> under signed additive bias scenarios: &tau;<sub>adjusted</sub>(b) = &tau;<sub>observed</sub> &minus; b.
-                    <strong>Critical limitation:</strong> Sensitivity analysis explores hypothetical scenarios; it does NOT prove the absence of unmeasured confounding.
                 </div>
 
                 <!-- Mode Selection Radios -->
@@ -1379,95 +1311,30 @@
         <section class="section-card" aria-labelledby="methods-heading">
             <div class="section-header">
                 <h3 id="methods-heading">8. Available Causal Analysis Methods</h3>
-                <p>Six estimators designed for experimental and observational causal inference with explicit identification assumptions.</p>
             </div>
 
             <div class="methods-grid">
-                <!-- Method 1: Unadjusted ATE -->
-                <article class="method-card">
-                    <div class="method-top">
-                        <span class="method-number">Method 1</span>
-                        <h4 class="method-title">Unadjusted ATE</h4>
-                        <p class="method-desc">Computes the raw difference in group means between treated and control units, accompanied by Welch's robust standard errors and confidence intervals.</p>
-                    </div>
-                    <div class="method-meta">
-                        <div><strong>Assumption:</strong> Randomized treatment assignment</div>
-                        <span class="method-endpoint">POST /api/causal/unadjusted-ate</span>
-                    </div>
-                </article>
-
-                <!-- Method 2: Regression-Adjusted ATE -->
-                <article class="method-card">
-                    <div class="method-top">
-                        <span class="method-number">Method 2</span>
-                        <h4 class="method-title">Regression-Adjusted ATE</h4>
-                        <p class="method-desc">Adjusts for observed confounders using G-computation (standardization) over an Ordinary Least Squares outcome response surface.</p>
-                    </div>
-                    <div class="method-meta">
-                        <div><strong>Assumption:</strong> Conditional unconfoundedness, correct outcome model</div>
-                        <span class="method-endpoint">POST /api/causal/regression-adjusted-ate</span>
-                    </div>
-                </article>
-
-                <!-- Method 3: Propensity Scores -->
-                <article class="method-card">
-                    <div class="method-top">
-                        <span class="method-number">Method 3</span>
-                        <h4 class="method-title">Propensity Scores</h4>
-                        <p class="method-desc">Estimates conditional probabilities of treatment assignment via logistic regression, producing overlap diagnostics and common support tests.</p>
-                    </div>
-                    <div class="method-meta">
-                        <div><strong>Assumption:</strong> Positivity (0 &lt; e(X) &lt; 1), no unmeasured confounders</div>
-                        <span class="method-endpoint">POST /api/causal/propensity-scores</span>
-                    </div>
-                </article>
-
-                <!-- Method 4: IPTW ATE -->
-                <article class="method-card">
-                    <div class="method-top">
-                        <span class="method-number">Method 4</span>
-                        <h4 class="method-title">IPTW ATE</h4>
-                        <p class="method-desc">Reweights observations by inverse propensity scores using the H&aacute;jek estimator. Reports Kish effective sample size and covariate balance (SMD).</p>
-                    </div>
-                    <div class="method-meta">
-                        <div><strong>Assumption:</strong> Strong exchangeability, positivity</div>
-                        <span class="method-endpoint">POST /api/causal/iptw-ate</span>
-                    </div>
-                </article>
-
-                <!-- Method 5: Difference-in-Differences -->
-                <article class="method-card">
-                    <div class="method-top">
-                        <span class="method-number">Method 5</span>
-                        <h4 class="method-title">Difference-in-Differences</h4>
-                        <p class="method-desc">Computes double-differenced treatment effects across two groups and two time periods, removing time-invariant unobserved confounding.</p>
-                    </div>
-                    <div class="method-meta">
-                        <div><strong>Assumption:</strong> Parallel counterfactual trends</div>
-                        <span class="method-endpoint">POST /api/causal/difference-in-differences</span>
-                    </div>
-                </article>
-
-                <!-- Method 6: Sensitivity Analysis -->
-                <article class="method-card">
-                    <div class="method-top">
-                        <span class="method-number">Method 6</span>
-                        <h4 class="method-title">Sensitivity Analysis</h4>
-                        <p class="method-desc">Quantifies the vulnerability of causal estimates to unmeasured confounding bias and tests weight stability under propensity score truncation.</p>
-                    </div>
-                    <div class="method-meta">
-                        <div><strong>Assumption:</strong> Bounded unmeasured confounding bias</div>
-                        <span class="method-endpoint">POST /api/causal/sensitivity-analysis</span>
-                    </div>
-                </article>
+                <div class="method-card">
+                    <h4 class="method-title">Unadjusted ATE</h4>
+                </div>
+                <div class="method-card">
+                    <h4 class="method-title">Regression-Adjusted ATE</h4>
+                </div>
+                <div class="method-card">
+                    <h4 class="method-title">Propensity Scores</h4>
+                </div>
+                <div class="method-card">
+                    <h4 class="method-title">IPTW</h4>
+                </div>
+                <div class="method-card">
+                    <h4 class="method-title">Difference-in-Differences</h4>
+                </div>
+                <div class="method-card">
+                    <h4 class="method-title">Sensitivity Analysis</h4>
+                </div>
             </div>
         </section>
     </main>
-
-    <!-- Footer -->
-    <footer class="dashboard-footer">
-        <p>Experimentation and Causal Inference Platform &bull; MCA Internship Project &bull; FastAPI Backend Service &bull; <a href="/docs">API Documentation (/docs)</a> &bull; <a href="/health">Health Endpoint (/health)</a></p>
-    </footer>
 
     <!-- Scripts -->
     <script src="/static/js/dashboard.js"></script>

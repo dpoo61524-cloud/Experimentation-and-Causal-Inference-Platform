@@ -493,7 +493,7 @@ def test_dashboard_html_contains_sensitivity_section():
 
     # Section wrapper
     assert 'id="sensitivity-analysis-section"' in html
-    assert "Causal Sensitivity Analysis" in html
+    assert "Sensitivity Analysis" in html
 
     # Mode controls
     assert 'id="sens-mode-dataset"' in html

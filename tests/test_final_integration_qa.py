@@ -45,13 +45,12 @@ def test_dashboard_serving_and_section_structure():
     html = res.text
 
     # Title & Branding
-    assert "Experimentation and Causal Inference Platform" in html
+    assert "Causal Analysis Dashboard" in html
     assert "dashboard.css" in html
 
     # Section 1: Ingestion & Schema Inspector
     assert 'id="csv-file-input"' in html
     assert 'id="upload-csv-btn"' in html
-    assert 'id="load-benchmark-btn"' in html
     assert 'id="preview-table-header"' in html
     assert 'id="schema-table-body"' in html
 

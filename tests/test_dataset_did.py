@@ -599,7 +599,7 @@ def test_dashboard_html_contains_did_section():
 
     assert 'id="did-analysis-section"' in html
     assert 'id="did-analysis-heading"' in html
-    assert '6. Causal Analysis: Difference-in-Differences (DiD)' in html
+    assert '6. Difference-in-Differences (DiD)' in html
     assert 'id="did-status-banner"' in html
     assert 'id="did-unloaded-notice"' in html
     assert 'id="did-form-container"' in html

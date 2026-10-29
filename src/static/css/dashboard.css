@@ -234,11 +234,22 @@ body {
 }
 
 .upload-box {
-    flex: 1 1 360px;
+    flex: 1 1 100%;
+    max-width: 520px;
     border: 1px solid var(--border-color);
     border-radius: var(--radius-sm);
     padding: 16px;
     background-color: var(--warm-neutral-bg);
+}
+
+.uploaded-file-info {
+    margin-top: 14px;
+    padding: 10px 14px;
+    background-color: var(--soft-sage-surface);
+    border: 1px solid var(--sage-accent);
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    color: var(--primary-charcoal);
 }
 
 .upload-box h4, .benchmark-box h4 {
@@ -509,79 +520,28 @@ body {
 /* --- Causal Methods Grid --- */
 .methods-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-    gap: 16px;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
 }
 
 .method-card {
     background-color: var(--white-surface);
     border: 1px solid var(--border-color);
     border-radius: var(--radius-sm);
-    padding: 16px;
+    padding: 14px 16px;
     display: flex;
-    flex-direction: column;
-    justify-content: space-between;
+    align-items: center;
 }
 
 .method-card:hover {
     border-color: var(--sage-accent);
 }
 
-.method-top {
-    margin-bottom: 12px;
-}
-
-.method-number {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--deep-sage);
-    background-color: var(--soft-sage-surface);
-    border: 1px solid var(--border-color);
-    padding: 2px 6px;
-    border-radius: var(--radius-sm);
-    display: inline-block;
-    margin-bottom: 8px;
-}
-
 .method-title {
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 600;
     color: var(--text-primary);
-    margin-bottom: 6px;
-}
-
-.method-desc {
-    font-size: 13px;
-    color: var(--text-secondary);
-    line-height: 1.5;
-    margin-bottom: 8px;
-}
-
-.method-meta {
-    font-size: 12px;
-    color: var(--text-muted);
-    line-height: 1.4;
-    border-top: 1px solid var(--border-color);
-    padding-top: 8px;
-    margin-top: 8px;
-}
-
-.method-meta strong {
-    color: var(--text-primary);
-}
-
-.method-endpoint {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    background-color: var(--warm-neutral-bg);
-    border: 1px solid var(--border-color);
-    padding: 3px 6px;
-    border-radius: var(--radius-sm);
-    color: var(--primary-charcoal);
-    display: inline-block;
-    margin-top: 6px;
-    word-break: break-all;
+    margin: 0;
 }
 
 /* --- Dataset Initial State (Empty State) --- */

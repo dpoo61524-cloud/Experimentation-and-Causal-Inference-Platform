@@ -52,22 +52,16 @@ def test_dashboard_endpoint_serves_html():
     assert "text/html" in response.headers.get("content-type", "").lower()
 
     html = response.text
-    # Verify application title and academic subtitle
-    assert "Experimentation and Causal Inference Platform" in html
-    assert "academic experimentation and causal inference tool" in html
+    # Verify main dashboard heading
+    assert "Causal Analysis Dashboard" in html
 
     # Verify all six causal analysis method names
     assert "Unadjusted ATE" in html
     assert "Regression-Adjusted ATE" in html
     assert "Propensity Scores" in html
-    assert "IPTW ATE" in html
+    assert "IPTW" in html
     assert "Difference-in-Differences" in html
     assert "Sensitivity Analysis" in html
-
-    # Verify health status badge and causal endpoint references
-    assert "health-badge" in html
-    assert "/api/causal/unadjusted-ate" in html
-    assert "/api/causal/iptw-ate" in html
 
 
 def test_dashboard_static_css_asset():

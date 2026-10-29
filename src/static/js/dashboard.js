@@ -331,8 +331,9 @@ document.addEventListener('DOMContentLoaded', function () {
         if (fileInput) fileInput.disabled = isBusy;
     }
 
-    // --- 1. Real API Health Check ---
+    // --- 1. Real API Health Check (if present in DOM) ---
     function checkHealth() {
+        if (!healthBadge || !healthText) return;
         fetch('/health', { method: 'GET', headers: { 'Accept': 'application/json' } })
             .then(function (res) {
                 if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -340,20 +341,22 @@ document.addEventListener('DOMContentLoaded', function () {
             })
             .then(function (data) {
                 if (data && data.status === 'healthy') {
-                    healthBadge.className = 'health-badge health-healthy';
-                    healthText.textContent = 'API: Healthy';
+                    if (healthBadge) healthBadge.className = 'health-badge health-healthy';
+                    if (healthText) healthText.textContent = 'API: Healthy';
                 } else {
-                    healthBadge.className = 'health-badge health-unhealthy';
-                    healthText.textContent = 'API: Unhealthy';
+                    if (healthBadge) healthBadge.className = 'health-badge health-unhealthy';
+                    if (healthText) healthText.textContent = 'API: Unhealthy';
                 }
             })
             .catch(function () {
-                healthBadge.className = 'health-badge health-unhealthy';
-                healthText.textContent = 'API: Offline';
+                if (healthBadge) healthBadge.className = 'health-badge health-unhealthy';
+                if (healthText) healthText.textContent = 'API: Offline';
             });
     }
 
-    checkHealth();
+    if (healthBadge && healthText) {
+        checkHealth();
+    }
 
     // --- 2. File Selection Handler ---
     if (fileInput) {
@@ -361,10 +364,10 @@ document.addEventListener('DOMContentLoaded', function () {
             clearStatus();
             const file = fileInput.files[0];
             if (file) {
-                fileMetaDisplay.textContent = 'Selected: ' + file.name + ' (' + formatBytes(file.size) + ')';
+                fileMetaDisplay.textContent = file.name;
                 uploadBtn.disabled = false;
             } else {
-                fileMetaDisplay.textContent = 'No file chosen (Max upload limit: 500 MB)';
+                fileMetaDisplay.textContent = 'No file chosen';
                 uploadBtn.disabled = true;
             }
         });
@@ -449,6 +452,17 @@ document.addEventListener('DOMContentLoaded', function () {
         // Toggle states
         if (emptyDatasetState) emptyDatasetState.style.display = 'none';
         if (loadedDatasetView) loadedDatasetView.style.display = 'block';
+
+        // Update prominent uploaded file display in upload card
+        const uploadedBanner = document.getElementById('uploaded-file-banner');
+        if (uploadedBanner && data.filename) {
+            uploadedBanner.style.display = 'block';
+            uploadedBanner.textContent = '';
+            const strong = document.createElement('strong');
+            strong.textContent = 'Uploaded file: ';
+            uploadedBanner.appendChild(strong);
+            uploadedBanner.appendChild(document.createTextNode(data.filename));
+        }
 
         // 1. Overview KPI Cards
         const benchmarkTag = data.is_benchmark ? ' [Benchmark]' : '';
