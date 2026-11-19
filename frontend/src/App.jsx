@@ -20,7 +20,7 @@ const METHODS = [
   { id: 'two_sample_ttest', name: "Welch's Two-Sample t-Test", category: 'Frequentist' },
 ];
 
-function getPlainEnglishConclusion(results, selectedMethod) {
+function getExecutiveConclusion(results, selectedMethod) {
   if (!results) return null;
 
   // 1. Group-Sequential Testing
@@ -604,9 +604,9 @@ export default function App() {
         <div>
           {results ? (
             <div>
-              {/* Plain-English Conclusion Box */}
+              {/* Conclusion Box */}
               {(() => {
-                const conclusion = getPlainEnglishConclusion(results, selectedMethod);
+                const conclusion = getExecutiveConclusion(results, selectedMethod);
                 return (
                   <div className="conclusion-box">
                     <div className="conclusion-title">
@@ -624,7 +624,7 @@ export default function App() {
                       >
                         {conclusion.badge}
                       </span>
-                      <span>Plain-English Conclusion</span>
+                      <span>Conclusion</span>
                     </div>
                     <div className="conclusion-text">
                       {conclusion.text}
