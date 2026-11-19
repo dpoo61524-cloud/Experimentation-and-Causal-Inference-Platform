@@ -43,6 +43,10 @@ from dataset_manager import (
     default_dataset_manager,
     MISSING_TOKENS,
 )
+from pymc_bayesian_engine import run_pymc_bayesian_ab
+from propensity_score_matching import estimate_propensity_score_matching
+from synthetic_control import estimate_synthetic_control
+from dowhy_econml_engine import run_dowhy_causal_pipeline
 from urllib.parse import unquote
 import numpy as np
 import pandas as pd
@@ -60,6 +64,14 @@ app = FastAPI(
 
 # Mount static files directory for the frontend dashboard
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+FRONTEND_DIST_DIR = SRC_DIR.parent / "frontend" / "dist"
+if FRONTEND_DIST_DIR.is_dir():
+    app.mount("/react", StaticFiles(directory=str(FRONTEND_DIST_DIR), html=True), name="react_app")
+    if (FRONTEND_DIST_DIR / "assets").is_dir():
+        app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST_DIR / "assets")), name="react_assets")
+
+
 
 
 @app.exception_handler(ValueError)
@@ -285,18 +297,49 @@ async def dashboard() -> FileResponse:
     tags=["Datasets"],
     summary="Upload and inspect CSV dataset with bounded streaming",
 )
+@app.post("/api/datasets/upload", response_model=DatasetIngestionResponse, include_in_schema=False)
+@app.post("/api/v1/dataset/upload", response_model=DatasetIngestionResponse, include_in_schema=False)
+@app.post("/api/v1/datasets/upload", response_model=DatasetIngestionResponse, include_in_schema=False)
 async def upload_dataset_endpoint(request: Request) -> DatasetIngestionResponse:
     """Stream an uploaded CSV dataset to managed storage, enforcing bounded memory and size limits.
 
     Parses headers, validates row consistency, infers column data types,
     computes missing value statistics, and generates a bounded 5-row preview.
+    Supports both raw text/csv streaming and multipart/form-data.
     """
     raw_filename = request.headers.get("X-Filename") or request.query_params.get("filename") or "uploaded_dataset.csv"
     clean_filename = unquote(raw_filename)
 
+    content_type = request.headers.get("content-type", "")
+    stream_gen = None
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        uploaded_item = form.get("file") or form.get("dataset")
+        if uploaded_item is None:
+            for val in form.values():
+                if hasattr(val, "filename"):
+                    uploaded_item = val
+                    break
+
+        if uploaded_item is not None and hasattr(uploaded_item, "filename"):
+            clean_filename = unquote(uploaded_item.filename or "uploaded_dataset.csv")
+
+            async def _multipart_stream():
+                while True:
+                    chunk = await uploaded_item.read(64 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+
+            stream_gen = _multipart_stream()
+
+    if stream_gen is None:
+        stream_gen = request.stream()
+
     try:
         response = await default_dataset_manager.ingest_stream(
-            request.stream(),
+            stream_gen,
             filename=clean_filename,
         )
         return response
@@ -340,6 +383,9 @@ async def load_benchmark_endpoint() -> DatasetIngestionResponse:
     tags=["Datasets"],
     summary="Retrieve dataset schema and preview by opaque ID",
 )
+@app.get("/api/datasets/{dataset_id}", response_model=DatasetIngestionResponse, include_in_schema=False)
+@app.get("/api/v1/dataset/{dataset_id}", response_model=DatasetIngestionResponse, include_in_schema=False)
+@app.get("/api/v1/datasets/{dataset_id}", response_model=DatasetIngestionResponse, include_in_schema=False)
 async def get_dataset_metadata(dataset_id: str) -> DatasetIngestionResponse:
     """Retrieve metadata and bounded preview for an active dataset by its opaque UUID4 identifier."""
     dataset = default_dataset_manager.get_dataset(dataset_id)
@@ -450,6 +496,16 @@ class TTestRequest(BaseModel):
         examples=[0.05],
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def handle_sample_aliases(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "group_a" not in data and "sample_a" in data:
+                data["group_a"] = data["sample_a"]
+            if "group_b" not in data and "sample_b" in data:
+                data["group_b"] = data["sample_b"]
+        return data
+
     @field_validator("group_a", "group_b", mode="before")
     @classmethod
     def check_strictly_numbers(cls, values: Any, info: Any) -> Any:
@@ -499,6 +555,8 @@ class TTestResponse(BaseModel):
     tags=["Experimentation"],
     summary="Independent two-sample Welch's t-test",
 )
+@app.post("/api/v1/ttest", response_model=TTestResponse, include_in_schema=False)
+@app.post("/api/ttest", response_model=TTestResponse, include_in_schema=False)
 async def run_two_sample_ttest(
     payload: TTestRequest,
 ) -> Dict[str, Any]:
@@ -780,6 +838,10 @@ class SequentialTestResponse(BaseModel):
     tags=["Experimentation"],
     summary="Group-sequential testing for conversion rates",
 )
+@app.post("/api/v1/group-sequential", response_model=SequentialTestResponse, include_in_schema=False)
+@app.post("/api/v1/sequential", response_model=SequentialTestResponse, include_in_schema=False)
+@app.post("/api/group-sequential", response_model=SequentialTestResponse, include_in_schema=False)
+@app.post("/api/sequential", response_model=SequentialTestResponse, include_in_schema=False)
 async def run_sequential_endpoint(
     payload: SequentialTestRequest,
 ) -> Dict[str, Any]:
@@ -2821,6 +2883,9 @@ class CausalDifferenceInDifferencesResponse(BaseModel):
     tags=["Causal Inference"],
     summary="Estimate treatment effect using Difference-in-Differences (DiD)",
 )
+@app.post("/api/v1/causal/difference-in-differences", response_model=CausalDifferenceInDifferencesResponse, include_in_schema=False)
+@app.post("/api/v1/causal/did", response_model=CausalDifferenceInDifferencesResponse, include_in_schema=False)
+@app.post("/api/causal/did", response_model=CausalDifferenceInDifferencesResponse, include_in_schema=False)
 async def difference_in_differences_endpoint(
     payload: CausalDifferenceInDifferencesRequest,
 ) -> Dict[str, Any]:
@@ -2986,6 +3051,8 @@ class DatasetCausalDifferenceInDifferencesResponse(CausalDifferenceInDifferences
     tags=["Causal Inference", "Datasets"],
     summary="Estimate Difference-in-Differences treatment effect for a stored dataset",
 )
+@app.post("/api/v1/causal/dataset-did/{dataset_id}", response_model=DatasetCausalDifferenceInDifferencesResponse, include_in_schema=False)
+@app.post("/api/dataset/{dataset_id}/causal/did", response_model=DatasetCausalDifferenceInDifferencesResponse, include_in_schema=False)
 async def dataset_difference_in_differences_endpoint(
     dataset_id: str,
     payload: DatasetDifferenceInDifferencesRequest,
@@ -3843,6 +3910,267 @@ async def dataset_causal_sensitivity_analysis_endpoint(
                 status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
                 detail=str(exc),
             )
+
+
+# --- Milestone 5 & 6 Endpoints: PyMC Bayesian, PSM, Synthetic Control, DoWhy Pipeline ---
+
+class PyMCBayesianRequest(BaseModel):
+    conversions_a: int = Field(..., ge=0, description="Conversion count for Group A")
+    visitors_a: int = Field(..., gt=0, description="Visitor count for Group A")
+    conversions_b: int = Field(..., ge=0, description="Conversion count for Group B")
+    visitors_b: int = Field(..., gt=0, description="Visitor count for Group B")
+    alpha_prior_a: float = Field(1.0, gt=0)
+    beta_prior_a: float = Field(1.0, gt=0)
+    alpha_prior_b: float = Field(1.0, gt=0)
+    beta_prior_b: float = Field(1.0, gt=0)
+    draws: int = Field(2000, gt=100)
+    tune: int = Field(1000, ge=0)
+    minimum_effect: float = Field(0.0)
+    credible_level: float = Field(0.95, gt=0.5, lt=1.0)
+
+
+@app.post(
+    "/api/v1/bayesian-ab/pymc",
+    summary="Bayesian A/B analysis with PyMC MCMC sampling and conjugate fallback",
+    tags=["Bayesian A/B Testing"],
+)
+def api_pymc_bayesian_ab(payload: PyMCBayesianRequest):
+    try:
+        results = run_pymc_bayesian_ab(
+            conversions_a=payload.conversions_a,
+            visitors_a=payload.visitors_a,
+            conversions_b=payload.conversions_b,
+            visitors_b=payload.visitors_b,
+            alpha_prior_a=payload.alpha_prior_a,
+            beta_prior_a=payload.beta_prior_a,
+            alpha_prior_b=payload.alpha_prior_b,
+            beta_prior_b=payload.beta_prior_b,
+            draws=payload.draws,
+            tune=payload.tune,
+            minimum_effect=payload.minimum_effect,
+            credible_level=payload.credible_level,
+        )
+        return _sanitize_for_json(results)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=str(exc),
+        )
+
+
+class PSMDirectRequest(BaseModel):
+    data: List[Dict[str, Any]] = Field(..., description="Array of row objects")
+    treatment_col: str = Field(..., description="Treatment column name")
+    outcome_col: str = Field(..., description="Outcome column name")
+    confounder_cols: List[str] = Field(..., description="List of baseline confounders")
+    caliper: Optional[float] = Field(0.2, description="Caliper standard distance")
+    replacement: bool = Field(False, description="Match with replacement")
+
+
+@app.post(
+    "/api/v1/causal/propensity-score-matching",
+    summary="Propensity Score Matching (ATT estimation with balance checks)",
+    tags=["Causal Inference - Observational"],
+)
+def api_propensity_score_matching(payload: PSMDirectRequest):
+    try:
+        df = pd.DataFrame(payload.data)
+        results = estimate_propensity_score_matching(
+            data=df,
+            treatment_col=payload.treatment_col,
+            outcome_col=payload.outcome_col,
+            confounder_cols=payload.confounder_cols,
+            caliper=payload.caliper,
+            replacement=payload.replacement,
+        )
+        return _sanitize_for_json(results)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=str(exc),
+        )
+
+
+class DatasetPSMRequest(BaseModel):
+    treatment_col: str = Field(...)
+    outcome_col: str = Field(...)
+    confounder_cols: List[str] = Field(...)
+    caliper: Optional[float] = Field(0.2)
+    replacement: bool = Field(False)
+
+
+@app.post(
+    "/api/v1/causal/dataset-psm/{dataset_id}",
+    summary="Dataset-backed Propensity Score Matching",
+    tags=["Causal Inference - Observational"],
+)
+@app.post("/api/dataset/{dataset_id}/causal/psm", include_in_schema=False)
+@app.post("/api/dataset/{dataset_id}/causal/propensity-score-matching", include_in_schema=False)
+def api_dataset_propensity_score_matching(dataset_id: str, payload: DatasetPSMRequest):
+    df_path = default_dataset_manager.get_dataset_path(dataset_id)
+    if not df_path or not df_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+    try:
+        df = pd.read_csv(df_path, na_values=MISSING_TOKENS, keep_default_na=True)
+        results = estimate_propensity_score_matching(
+            data=df,
+            treatment_col=payload.treatment_col,
+            outcome_col=payload.outcome_col,
+            confounder_cols=payload.confounder_cols,
+            caliper=payload.caliper,
+            replacement=payload.replacement,
+        )
+        results["dataset_id"] = dataset_id
+        return _sanitize_for_json(results)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=str(exc),
+        )
+
+
+class SyntheticControlDirectRequest(BaseModel):
+    data: List[Dict[str, Any]] = Field(...)
+    unit_col: str = Field(...)
+    time_col: str = Field(...)
+    outcome_col: str = Field(...)
+    treated_unit: Any = Field(...)
+    treatment_time: Any = Field(...)
+
+
+@app.post(
+    "/api/v1/causal/synthetic-control",
+    summary="Synthetic Control Method (Abadie et al. constrained optimization)",
+    tags=["Causal Inference - Observational"],
+)
+def api_synthetic_control(payload: SyntheticControlDirectRequest):
+    try:
+        df = pd.DataFrame(payload.data)
+        results = estimate_synthetic_control(
+            data=df,
+            unit_col=payload.unit_col,
+            time_col=payload.time_col,
+            outcome_col=payload.outcome_col,
+            treated_unit=payload.treated_unit,
+            treatment_time=payload.treatment_time,
+        )
+        return _sanitize_for_json(results)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=str(exc),
+        )
+
+
+class DatasetSyntheticControlRequest(BaseModel):
+    unit_col: str = Field(...)
+    time_col: str = Field(...)
+    outcome_col: str = Field(...)
+    treated_unit: Any = Field(...)
+    treatment_time: Any = Field(...)
+
+
+@app.post(
+    "/api/v1/causal/dataset-synthetic-control/{dataset_id}",
+    summary="Dataset-backed Synthetic Control Method",
+    tags=["Causal Inference - Observational"],
+)
+@app.post("/api/dataset/{dataset_id}/causal/synthetic-control", include_in_schema=False)
+def api_dataset_synthetic_control(dataset_id: str, payload: DatasetSyntheticControlRequest):
+    df_path = default_dataset_manager.get_dataset_path(dataset_id)
+    if not df_path or not df_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+    try:
+        df = pd.read_csv(df_path, na_values=MISSING_TOKENS, keep_default_na=True)
+        results = estimate_synthetic_control(
+            data=df,
+            unit_col=payload.unit_col,
+            time_col=payload.time_col,
+            outcome_col=payload.outcome_col,
+            treated_unit=payload.treated_unit,
+            treatment_time=payload.treatment_time,
+        )
+        results["dataset_id"] = dataset_id
+        return _sanitize_for_json(results)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=str(exc),
+        )
+
+
+class DoWhyPipelineDirectRequest(BaseModel):
+    data: List[Dict[str, Any]] = Field(...)
+    treatment_col: str = Field(...)
+    outcome_col: str = Field(...)
+    common_causes: List[str] = Field(...)
+    estimation_method: str = Field("backdoor.linear_regression")
+    run_refutations: bool = Field(True)
+
+
+@app.post(
+    "/api/v1/causal/dowhy",
+    summary="DoWhy Causal Inference (Model, Identify, Estimate, Refute)",
+    tags=["Causal Inference - Observational"],
+)
+@app.post("/api/v1/causal/dowhy-pipeline", include_in_schema=False)
+@app.post("/api/causal/dowhy", include_in_schema=False)
+def api_dowhy_pipeline(payload: DoWhyPipelineDirectRequest):
+    try:
+        df = pd.DataFrame(payload.data)
+        results = run_dowhy_causal_pipeline(
+            data=df,
+            treatment_col=payload.treatment_col,
+            outcome_col=payload.outcome_col,
+            common_causes=payload.common_causes,
+            estimation_method=payload.estimation_method,
+            run_refutations=payload.run_refutations,
+        )
+        return _sanitize_for_json(results)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=str(exc),
+        )
+
+
+class DatasetDoWhyPipelineRequest(BaseModel):
+    treatment_col: str = Field(...)
+    outcome_col: str = Field(...)
+    common_causes: List[str] = Field(...)
+    estimation_method: str = Field("backdoor.linear_regression")
+    run_refutations: bool = Field(True)
+
+
+@app.post(
+    "/api/v1/causal/dataset-dowhy/{dataset_id}",
+    summary="Dataset-backed DoWhy Causal Inference",
+    tags=["Causal Inference - Observational"],
+)
+@app.post("/api/v1/causal/dataset-dowhy-pipeline/{dataset_id}", include_in_schema=False)
+@app.post("/api/dataset/{dataset_id}/causal/dowhy", include_in_schema=False)
+@app.post("/api/dataset/{dataset_id}/causal/dowhy-pipeline", include_in_schema=False)
+def api_dataset_dowhy_pipeline(dataset_id: str, payload: DatasetDoWhyPipelineRequest):
+    df_path = default_dataset_manager.get_dataset_path(dataset_id)
+    if not df_path or not df_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+    try:
+        df = pd.read_csv(df_path, na_values=MISSING_TOKENS, keep_default_na=True)
+        results = run_dowhy_causal_pipeline(
+            data=df,
+            treatment_col=payload.treatment_col,
+            outcome_col=payload.outcome_col,
+            common_causes=payload.common_causes,
+            estimation_method=payload.estimation_method,
+            run_refutations=payload.run_refutations,
+        )
+        results["dataset_id"] = dataset_id
+        return _sanitize_for_json(results)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422),
+            detail=str(exc),
+        )
 
 
 if __name__ == "__main__":

@@ -163,23 +163,108 @@ class DatasetManager:
         return removed_count
 
     def get_dataset(self, dataset_id: str) -> Optional[DatasetIngestionResponse]:
-        """Retrieve stored dataset metadata by opaque ID."""
-        if not isinstance(dataset_id, str) or not UUID4_PATTERN.match(dataset_id):
+        """Retrieve stored dataset metadata by opaque ID, filename, or alias."""
+        if not isinstance(dataset_id, str) or not dataset_id.strip():
             return None
         self.cleanup_expired()
+
+        # 1. Exact match in _registry
         entry = self._registry.get(dataset_id)
-        if entry is None:
-            return None
-        return entry[0]
+        if entry is not None:
+            return entry[0]
+
+        # 2. Check if dataset_id matches any registered dataset's filename or stem
+        clean_id = dataset_id.strip()
+        lower_id = clean_id.lower()
+        for registered_id, (resp, _) in self._registry.items():
+            if resp.filename and (
+                resp.filename.lower() == lower_id
+                or Path(resp.filename).stem.lower() == lower_id
+                or Path(resp.filename).stem.lower() == Path(lower_id).stem
+            ):
+                return resp
+
+        # 3. Check for Hillstrom benchmark aliases
+        if lower_id in ("hillstrom", "hillstrome", "hillstrom.csv", "hillstrome.csv"):
+            project_root = Path(__file__).resolve().parent.parent
+            bench_path = project_root / "data" / "hillstrom.csv"
+            if not bench_path.is_file():
+                bench_path = project_root / "data" / "hillstrome.csv"
+            if bench_path.is_file():
+                return self.inspect_and_catalog(
+                    bench_path,
+                    original_filename=clean_id if clean_id.endswith(".csv") else f"{clean_id}.csv",
+                    is_benchmark=True,
+                )
+
+        # 4. Check on-disk in storage_dir (e.g. across server restarts)
+        candidate = self.storage_dir / f"{clean_id}.csv"
+        if candidate.is_file():
+            return self.inspect_and_catalog(candidate, original_filename=f"{clean_id}.csv")
+        candidate2 = self.storage_dir / clean_id
+        if candidate2.is_file():
+            return self.inspect_and_catalog(candidate2, original_filename=clean_id)
+
+        # 5. Check any file in storage_dir matching clean_id by stem or name
+        for f in self.storage_dir.glob("*.csv"):
+            if f.name.lower() == lower_id or f.stem.lower() == lower_id or f.stem.lower() == Path(lower_id).stem:
+                return self.inspect_and_catalog(f, original_filename=f.name)
+
+        return None
 
     def get_dataset_file_path(self, dataset_id: str) -> Optional[Path]:
         """Retrieve the verified on-disk path for a stored dataset."""
-        if not isinstance(dataset_id, str) or not UUID4_PATTERN.match(dataset_id):
+        if not isinstance(dataset_id, str) or not dataset_id.strip():
             return None
-        file_path = self.storage_dir / f"{dataset_id}.csv"
-        if not file_path.is_file():
-            return None
-        return file_path
+
+        # 1. Check if dataset_id is registered
+        if dataset_id in self._registry:
+            file_path = self.storage_dir / f"{dataset_id}.csv"
+            if file_path.is_file():
+                return file_path
+
+        # 2. Check if dataset_id matches any registered dataset's filename or stem
+        clean_id = dataset_id.strip()
+        lower_id = clean_id.lower()
+        for registered_id, (resp, _) in self._registry.items():
+            if resp.filename and (
+                resp.filename.lower() == lower_id
+                or Path(resp.filename).stem.lower() == lower_id
+                or Path(resp.filename).stem.lower() == Path(lower_id).stem
+            ):
+                file_path = self.storage_dir / f"{registered_id}.csv"
+                if file_path.is_file():
+                    return file_path
+
+        # 3. Check for Hillstrom benchmark aliases
+        if lower_id in ("hillstrom", "hillstrome", "hillstrom.csv", "hillstrome.csv"):
+            project_root = Path(__file__).resolve().parent.parent
+            bench_path = project_root / "data" / "hillstrom.csv"
+            if bench_path.is_file():
+                return bench_path
+            bench_path2 = project_root / "data" / "hillstrome.csv"
+            if bench_path2.is_file():
+                return bench_path2
+
+        # 4. Check on-disk in storage_dir
+        candidate = self.storage_dir / f"{clean_id}.csv"
+        if candidate.is_file():
+            return candidate
+        candidate2 = self.storage_dir / clean_id
+        if candidate2.is_file():
+            return candidate2
+
+        # 5. Check any file in storage_dir matching clean_id by stem or name
+        for f in self.storage_dir.glob("*.csv"):
+            if f.name.lower() == lower_id or f.stem.lower() == lower_id or f.stem.lower() == Path(lower_id).stem:
+                return f
+
+        return None
+
+    def get_dataset_path(self, dataset_id: str) -> Optional[Path]:
+        """Alias for get_dataset_file_path."""
+        return self.get_dataset_file_path(dataset_id)
+
 
     def delete_dataset(self, dataset_id: str) -> bool:
         """Explicitly delete a dataset from storage and registry."""

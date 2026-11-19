@@ -1,6 +1,6 @@
 
 import math
-from typing import Any, Sequence
+from typing import Any, Optional, Sequence
 
 import numpy as np
 import scipy.stats as stats

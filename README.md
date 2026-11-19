@@ -20,6 +20,74 @@ A Python platform for A/B testing, causal inference, and statistical analysis, f
 
 ---
 
+## System Architecture
+
+The platform is organized into a modular, four-layer architecture separating client presentation, REST routing with schema validation, core analytical engines, and local data persistence:
+
+```mermaid
+flowchart TD
+    subgraph Clients["1. Clients & Presentation Layer"]
+        ReactUI["React Frontend Application (frontend/)<br/>• Vite + React 18 Single-Page App<br/>• Interactive Chart.js Visualizations<br/>• Plain-English Conclusion Banners<br/>• Dynamic CSV Column Selectors"]
+        DOCS["Interactive OpenAPI Documentation<br/>(Swagger UI / ReDoc)"]
+        HTTP["External REST API Clients<br/>(Python / curl / Automated Tests)"]
+    end
+
+    subgraph API["2. FastAPI Application & Routing Layer (src/api.py)"]
+        Uvicorn["ASGI Server & CORS Middleware"]
+        Schemas["Pydantic v2 Models & Schema Validation"]
+        RouterStat["Frequentist & Sequential Testing<br/>(/api/experiment/sequential, /ttest, /chisquare, /sample-size)"]
+        RouterBayes["Bayesian A/B Testing Routes<br/>(/api/v1/bayesian-ab/pymc, /api/v1/bayesian-ab)"]
+        RouterCausal["Observational Causal Inference Routes<br/>(Dataset PSM, DiD, Synthetic Control, DoWhy Causal)"]
+        RouterData["Dataset Ingestion & Storage Routes<br/>(/api/v1/dataset/upload, /preview, /delete)"]
+    end
+
+    subgraph Engines["3. Core Statistical & Causal Engines Layer (src/)"]
+        direction TB
+        StatEng["Statistics Engine (statistics_engine.py)<br/>• Welch's Two-Sample t-Test & Wilson CIs<br/>• O'Brien-Fleming Sequential Testing<br/>• Power & Sample Size Calculator (NormalIndPower)<br/>• Pearson Chi-Square with Yates Correction"]
+        BayesPyMC["PyMC Bayesian Engine (pymc_bayesian_engine.py)<br/>• Beta-Binomial Hierarchical MCMC (NUTS)<br/>• Analytical Beta Conjugate Fallback<br/>• P(B > A), Expected Loss, 95% HDI"]
+        PSMEng["Propensity Score Matching (propensity_score_matching.py)<br/>• Fast O(N log M) Binary Search Matching<br/>• Caliper Enforcement & Standardized Mean Difference (SMD)<br/>• Average Treatment Effect on Treated (ATT)"]
+        DiDEng["Difference-in-Differences (causal_engine.py)<br/>• 2x2 Parallel Trends Regression Estimator<br/>• Pre/Post Trend Counterfactuals"]
+        SynthCtrl["Synthetic Control (synthetic_control.py)<br/>• Constrained Donor-Weight Optimization (SLSQP)<br/>• Pre-Treatment RMSPE Minimization<br/>• Counterfactual Trajectories & Placebo Tests"]
+        DoWhyEng["DoWhy & EconML (dowhy_econml_engine.py)<br/>• Structural Causal Graph Formulation<br/>• LinearDML / EconML ATE Estimation<br/>• Placebo & Random Confounder Refutations"]
+        DataMgr["Dataset Manager (dataset_manager.py)<br/>• Streaming Chunked CSV Ingestion<br/>• In-Memory Dynamic Metadata & Column Inference<br/>• Bounded Memory Streaming"]
+        MultiComp["Multiple Comparisons (multiple_comparisons.py)<br/>• Bonferroni FWER & Benjamini-Hochberg FDR"]
+    end
+
+    subgraph Storage["4. Storage & Benchmark Data Layer"]
+        LocalDisk[("Managed Local Disk Storage<br/>(Streaming CSV Ingestion, FIFO Eviction)")]
+        BenchmarkData[("Hillstrom Benchmark Dataset<br/>(data/hillstrom.csv — 64,000 Rows)")]
+    end
+
+    ReactUI -->|"HTTP / REST API (JSON / Multipart)"| Uvicorn
+    DOCS -->|"OpenAPI Schema"| Uvicorn
+    HTTP -->|"JSON Payloads / Multipart"| Uvicorn
+
+    Uvicorn --> Schemas
+    Schemas --> RouterStat
+    Schemas --> RouterBayes
+    Schemas --> RouterCausal
+    Schemas --> RouterData
+
+    RouterStat --> StatEng
+    RouterStat --> MultiComp
+    RouterBayes --> BayesPyMC
+    RouterCausal --> PSMEng
+    RouterCausal --> DiDEng
+    RouterCausal --> SynthCtrl
+    RouterCausal --> DoWhyEng
+    RouterData --> DataMgr
+
+    RouterCausal -.->|"Resolves uploaded datasets"| DataMgr
+    PSMEng -.->|"Loads dataframe"| DataMgr
+    DoWhyEng -.->|"Loads dataframe"| DataMgr
+    DiDEng -.->|"Loads dataframe"| DataMgr
+
+    DataMgr -->|"File I/O"| LocalDisk
+    DataMgr -.->|"Benchmark Loader"| BenchmarkData
+```
+
+---
+
 ## Installation
 
 ### Prerequisites
