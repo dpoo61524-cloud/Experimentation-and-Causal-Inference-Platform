@@ -263,6 +263,8 @@ async def root() -> Dict[str, Any]:
         "description": "API for A/B testing statistical analysis and sample size estimation.",
         "version": "1.0.0",
         "docs_url": "/docs",
+        "react_url": "/react",
+        "dashboard_url": "/dashboard",
     }
 
 
